@@ -130,6 +130,10 @@ COLUMN_MAP = {
 
 CPA_TARGET = 90.0
 
+# Default scoring weights (as percentages that must sum to 100)
+CE_WEIGHTS_DEFAULT = {"thumbstop_rate": 40, "hold_6s": 30, "ctr": 30}
+FFQ_WEIGHTS_DEFAULT = {"cpa": 30, "paid_starts": 25, "trial_to_paid_cvr": 20, "ctr": 15, "thumbstop_rate": 10}
+
 
 def normalise_columns(df: pd.DataFrame) -> pd.DataFrame:
     """Rename columns to canonical names using COLUMN_MAP."""
@@ -294,8 +298,19 @@ def _min_max(s: pd.Series, lower_is_better: bool = False) -> pd.Series:
     return (1 - norm) if lower_is_better else norm
 
 
-def rank_by_goal(df: pd.DataFrame, goal: str) -> pd.DataFrame:
+def rank_by_goal(
+    df: pd.DataFrame,
+    goal: str,
+    cpa_target: float = CPA_TARGET,
+    ce_weights: dict | None = None,
+    ffq_weights: dict | None = None,
+) -> pd.DataFrame:
     """Return df sorted by the selected campaign goal, with a Goal Score column."""
+    if ce_weights is None:
+        ce_weights = CE_WEIGHTS_DEFAULT
+    if ffq_weights is None:
+        ffq_weights = FFQ_WEIGHTS_DEFAULT
+
     d = df.copy()
     if goal == "Paid Starts":
         if "paid_starts" in d.columns:
@@ -310,7 +325,7 @@ def rank_by_goal(df: pd.DataFrame, goal: str) -> pd.DataFrame:
             d = d.sort_values(
                 ["cpa", "paid_starts"], ascending=[True, False], na_position="last"
             )
-            d["scale_candidate"] = d["cpa"] < CPA_TARGET
+            d["scale_candidate"] = d["cpa"] < cpa_target
 
     elif goal == "Efficient Trial Starts":
         if "cpt" in d.columns:
@@ -319,33 +334,37 @@ def rank_by_goal(df: pd.DataFrame, goal: str) -> pd.DataFrame:
             )
 
     elif goal == "Creative Engagement":
+        ce_col_order = ["thumbstop_rate", "hold_6s", "ctr"]
         cols = []
         weights = []
-        if "thumbstop_rate" in d.columns:
-            cols.append("thumbstop_rate"); weights.append(0.40)
-        if "hold_6s" in d.columns:
-            cols.append("hold_6s"); weights.append(0.30)
-        if "ctr" in d.columns:
-            cols.append("ctr"); weights.append(0.30)
+        for col in ce_col_order:
+            if col in d.columns and col in ce_weights:
+                cols.append(col)
+                weights.append(ce_weights[col] / 100.0)
         if cols:
+            total_w = sum(weights)
             score = sum(_min_max(d[c]) * w for c, w in zip(cols, weights))
-            d["goal_score"] = score / sum(weights)
+            d["goal_score"] = score / total_w if total_w > 0 else 0
             d = d.sort_values("goal_score", ascending=False)
 
     elif goal == "Full Funnel Quality":
-        components = [
-            ("cpa", 0.30, True),
-            ("paid_starts", 0.25, False),
-            ("trial_to_paid_cvr", 0.20, False),
-            ("ctr", 0.15, False),
-            ("thumbstop_rate", 0.10, False),
+        ffq_col_order = [
+            ("cpa", True),
+            ("paid_starts", False),
+            ("trial_to_paid_cvr", False),
+            ("ctr", False),
+            ("thumbstop_rate", False),
         ]
-        total_w = sum(w for c, w, _ in components if c in d.columns)
+        components = [
+            (c, ffq_weights.get(c, 0) / 100.0, inv)
+            for c, inv in ffq_col_order
+            if c in d.columns and ffq_weights.get(c, 0) > 0
+        ]
+        total_w = sum(w for c, w, _ in components)
         if total_w > 0:
             score = sum(
                 _min_max(d[c], inv) * w
                 for c, w, inv in components
-                if c in d.columns
             )
             d["goal_score"] = score / total_w
             d = d.sort_values("goal_score", ascending=False)
@@ -355,7 +374,7 @@ def rank_by_goal(df: pd.DataFrame, goal: str) -> pd.DataFrame:
     return d
 
 
-def assign_decision_labels(df: pd.DataFrame) -> pd.DataFrame:
+def assign_decision_labels(df: pd.DataFrame, cpa_target: float = CPA_TARGET) -> pd.DataFrame:
     """Add Decision_Label column."""
     d = df.copy()
     labels = []
@@ -373,7 +392,7 @@ def assign_decision_labels(df: pd.DataFrame) -> pd.DataFrame:
         thumbstop = row.get("thumbstop_rate", np.nan)
 
         if not np.isnan(cpa) and not np.isnan(paid):
-            if cpa < CPA_TARGET and paid > median_paid:
+            if cpa < cpa_target and paid > median_paid:
                 labels.append("Scale")
                 continue
         if not np.isnan(thumbstop) and not np.isnan(paid):
@@ -385,7 +404,7 @@ def assign_decision_labels(df: pd.DataFrame) -> pd.DataFrame:
                 labels.append("Fix Funnel")
                 continue
         if not np.isnan(cpa) and not np.isnan(thumbstop):
-            if cpa > CPA_TARGET and thumbstop < median_thumbstop:
+            if cpa > cpa_target and thumbstop < median_thumbstop:
                 labels.append("Cut")
                 continue
         labels.append("Review")
@@ -450,10 +469,8 @@ def render_summary_cards(df: pd.DataFrame, goal: str):
     blended_cpa = (total_spend / total_paid) if (not np.isnan(total_spend) and total_paid) else np.nan
 
     best_creative = "—"
-    if "decision_label" in df.columns:
-        ranked = rank_by_goal(df, goal)
-        if not ranked.empty:
-            best_creative = ranked.iloc[0].get("creative_id", "—")
+    if not df.empty and "creative_id" in df.columns:
+        best_creative = df.iloc[0].get("creative_id", "—")
 
     scale_n = (df["decision_label"] == "Scale").sum() if "decision_label" in df.columns else 0
     cut_n = (df["decision_label"] == "Cut").sum() if "decision_label" in df.columns else 0
@@ -540,7 +557,7 @@ def render_ranking_table(df: pd.DataFrame):
     st.dataframe(styler, use_container_width=True, height=400)
 
 
-def render_charts(df: pd.DataFrame):
+def render_charts(df: pd.DataFrame, cpa_target: float = CPA_TARGET):
     chart_bg = "#0E1117"
     grid_color = "#1E2A45"
     font_color = "#FAFAFA"
@@ -559,8 +576,8 @@ def render_charts(df: pd.DataFrame):
                 color_continuous_scale=[[0, "#34d399"], [0.5, "#fbbf24"], [1, "#f87171"]],
             )
             fig.add_hline(
-                y=CPA_TARGET, line_dash="dash", line_color="#4F8EF7",
-                annotation_text=f"${CPA_TARGET} Target", annotation_font_color="#4F8EF7",
+                y=cpa_target, line_dash="dash", line_color="#4F8EF7",
+                annotation_text=f"${cpa_target:,.0f} Target", annotation_font_color="#4F8EF7",
             )
             fig.update_layout(
                 paper_bgcolor=chart_bg, plot_bgcolor=chart_bg,
@@ -616,8 +633,8 @@ def render_charts(df: pd.DataFrame):
                 hover_data=["creative_id", "decision_label"],
             )
             fig.add_vline(
-                x=CPA_TARGET, line_dash="dash", line_color="#4F8EF7",
-                annotation_text=f"${CPA_TARGET} CPA target", annotation_font_color="#4F8EF7",
+                x=cpa_target, line_dash="dash", line_color="#4F8EF7",
+                annotation_text=f"${cpa_target:,.0f} CPA target", annotation_font_color="#4F8EF7",
             )
             fig.update_traces(textposition="top center", textfont_size=9)
             fig.update_layout(
@@ -1095,7 +1112,16 @@ def render_integration_card(
 # PAGE RENDERERS
 # ══════════════════════════════════════════════════════════════════════════════
 
-def page_analyzer():
+def page_analyzer(
+    cpa_target: float = CPA_TARGET,
+    ce_weights: dict | None = None,
+    ffq_weights: dict | None = None,
+):
+    if ce_weights is None:
+        ce_weights = CE_WEIGHTS_DEFAULT
+    if ffq_weights is None:
+        ffq_weights = FFQ_WEIGHTS_DEFAULT
+
     st.markdown(
         """
         <div style="display:flex;align-items:center;gap:12px;margin-bottom:0.2rem;">
@@ -1144,7 +1170,7 @@ def page_analyzer():
             st.warning(w)
 
         df, kpi_warnings = calculate_kpis(df_raw)
-        df = assign_decision_labels(df)
+        df = assign_decision_labels(df, cpa_target=cpa_target)
 
         goal_options = [
             "Paid Starts", "Trial Starts", "Efficient Paid Starts",
@@ -1154,8 +1180,8 @@ def page_analyzer():
         with goal_col:
             goal = st.selectbox("Campaign Goal", goal_options, index=0)
 
-        df_ranked = rank_by_goal(df, goal)
-        df_ranked = assign_decision_labels(df_ranked)
+        df_ranked = rank_by_goal(df, goal, cpa_target=cpa_target, ce_weights=ce_weights, ffq_weights=ffq_weights)
+        df_ranked = assign_decision_labels(df_ranked, cpa_target=cpa_target)
 
         st.divider()
 
@@ -1172,7 +1198,7 @@ def page_analyzer():
         if goal == "Efficient Paid Starts" and "scale_candidate" in df_ranked.columns:
             candidates = df_ranked[df_ranked["scale_candidate"] == True]["creative_id"].tolist()
             if candidates:
-                st.success(f"🚀  **Scale Candidates** (CPA < ${CPA_TARGET}): {', '.join(str(c) for c in candidates)}")
+                st.success(f"🚀  **Scale Candidates** (CPA < ${cpa_target:,.0f}): {', '.join(str(c) for c in candidates)}")
 
         rank_hdr_col, csv_btn_col = st.columns([5, 1])
         with rank_hdr_col:
@@ -1207,7 +1233,7 @@ def page_analyzer():
                     use_container_width=True,
                     key="dl_png",
                 )
-        render_charts(df_ranked)
+        render_charts(df_ranked, cpa_target=cpa_target)
 
         st.divider()
 
@@ -1611,7 +1637,7 @@ if "df_raw" not in st.session_state:
 if "sheets_df" not in st.session_state:
     st.session_state.sheets_df = None
 
-# ── Sidebar navigation ────────────────────────────────────────────────────────
+# ── Sidebar: navigation + advanced settings ───────────────────────────────────
 with st.sidebar:
     st.markdown(
         "<div style='font-size:1.1rem;font-weight:800;letter-spacing:-0.01em;margin-bottom:4px;'>📊 Creative Analyzer</div>",
@@ -1626,10 +1652,71 @@ with st.sidebar:
     )
     st.divider()
     st.caption("Use the Integrations page to connect data sources, or load the built-in LoopNote sample on the Analyzer page.")
+    st.divider()
+    with st.expander("⚙️ Advanced settings", expanded=False):
+        st.markdown("**CPA Target**")
+        cpa_target = st.number_input(
+            "Target Cost per Paid Start ($)",
+            min_value=1.0,
+            max_value=10000.0,
+            value=float(CPA_TARGET),
+            step=5.0,
+            help="Creatives below this CPA are flagged as Scale candidates. Affects decision labels and chart reference lines.",
+        )
+
+        st.markdown("---")
+        st.markdown("**Creative Engagement weights**")
+        st.caption("Set the relative importance of each signal. Weights are auto-normalised so the total always equals 100%.")
+
+        ce_thumbstop = st.slider("Thumbstop Rate", 0, 100, CE_WEIGHTS_DEFAULT["thumbstop_rate"], key="ce_thumbstop")
+        ce_hold = st.slider("6s Hold Rate", 0, 100, CE_WEIGHTS_DEFAULT["hold_6s"], key="ce_hold")
+        ce_ctr = st.slider("CTR", 0, 100, CE_WEIGHTS_DEFAULT["ctr"], key="ce_ctr")
+        ce_total = ce_thumbstop + ce_hold + ce_ctr
+        if ce_total == 0:
+            st.error("At least one weight must be greater than 0.")
+            ce_weights = CE_WEIGHTS_DEFAULT
+        else:
+            ce_weights = {
+                "thumbstop_rate": ce_thumbstop,
+                "hold_6s": ce_hold,
+                "ctr": ce_ctr,
+            }
+            norm_thumb = round(ce_thumbstop / ce_total * 100)
+            norm_hold = round(ce_hold / ce_total * 100)
+            norm_ctr = 100 - norm_thumb - norm_hold
+            st.caption(f"Normalised → Thumbstop {norm_thumb}% · Hold {norm_hold}% · CTR {norm_ctr}%")
+
+        st.markdown("---")
+        st.markdown("**Full Funnel Quality weights**")
+        st.caption("Set the relative importance of each metric. Weights are auto-normalised so the total always equals 100%.")
+
+        ffq_cpa = st.slider("CPA (lower is better)", 0, 100, FFQ_WEIGHTS_DEFAULT["cpa"], key="ffq_cpa")
+        ffq_paid = st.slider("Paid Starts", 0, 100, FFQ_WEIGHTS_DEFAULT["paid_starts"], key="ffq_paid")
+        ffq_cvr = st.slider("Trial→Paid CVR", 0, 100, FFQ_WEIGHTS_DEFAULT["trial_to_paid_cvr"], key="ffq_cvr")
+        ffq_ctr = st.slider("CTR", 0, 100, FFQ_WEIGHTS_DEFAULT["ctr"], key="ffq_ctr")
+        ffq_thumbstop = st.slider("Thumbstop Rate", 0, 100, FFQ_WEIGHTS_DEFAULT["thumbstop_rate"], key="ffq_thumbstop")
+        ffq_total = ffq_cpa + ffq_paid + ffq_cvr + ffq_ctr + ffq_thumbstop
+        if ffq_total == 0:
+            st.error("At least one weight must be greater than 0.")
+            ffq_weights = FFQ_WEIGHTS_DEFAULT
+        else:
+            ffq_weights = {
+                "cpa": ffq_cpa,
+                "paid_starts": ffq_paid,
+                "trial_to_paid_cvr": ffq_cvr,
+                "ctr": ffq_ctr,
+                "thumbstop_rate": ffq_thumbstop,
+            }
+            n_cpa = round(ffq_cpa / ffq_total * 100)
+            n_paid = round(ffq_paid / ffq_total * 100)
+            n_cvr = round(ffq_cvr / ffq_total * 100)
+            n_ctr = round(ffq_ctr / ffq_total * 100)
+            n_thumb = 100 - n_cpa - n_paid - n_cvr - n_ctr
+            st.caption(f"Normalised → CPA {n_cpa}% · Paid {n_paid}% · CVR {n_cvr}% · CTR {n_ctr}% · Thumbstop {n_thumb}%")
 
 # ── Route to page ─────────────────────────────────────────────────────────────
 if page == "Analyzer":
-    page_analyzer()
+    page_analyzer(cpa_target=cpa_target, ce_weights=ce_weights, ffq_weights=ffq_weights)
 elif page == "Integrations":
     page_integrations()
 elif page == "Methodology":
