@@ -1733,9 +1733,15 @@ def page_analyzer(
             _default_goal_idx = goal_options.index(st.session_state.loaded_goal)
             st.session_state.loaded_goal = None
 
-        goal_col, spacer = st.columns([2, 5])
+        goal_col, spacer, clear_col = st.columns([2, 4, 1])
         with goal_col:
             goal = st.selectbox("Campaign Goal", goal_options, index=_default_goal_idx)
+        with clear_col:
+            st.write("")  # vertical alignment nudge
+            if st.button("🗑 Clear analysis", use_container_width=True, key="btn_clear_analysis"):
+                for _k in ("df_raw", "sheets_df", "warnings", "loaded_goal"):
+                    st.session_state[_k] = None
+                st.rerun()
 
         df_ranked = rank_by_goal(df, goal, cpa_target=cpa_target, ce_weights=ce_weights, ffq_weights=ffq_weights)
         df_ranked = assign_decision_labels(df_ranked, cpa_target=cpa_target)
