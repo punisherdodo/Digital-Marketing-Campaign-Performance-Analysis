@@ -532,26 +532,30 @@ def render_summary_cards(df: pd.DataFrame, goal: str):
 
     best_creative = "—"
     if not df.empty and "creative_id" in df.columns:
-        best_creative = df.iloc[0].get("creative_id", "—")
+        best_creative = str(df.iloc[0].get("creative_id", "—"))
 
     scale_n = (df["decision_label"] == "Scale").sum() if "decision_label" in df.columns else 0
     cut_n = (df["decision_label"] == "Cut").sum() if "decision_label" in df.columns else 0
 
-    cols = st.columns(7)
-    with cols[0]:
-        st.metric("Total Spend", fmt_currency(total_spend))
-    with cols[1]:
-        st.metric("Total Trial Starts", fmt_num(total_trials))
-    with cols[2]:
-        st.metric("Total Paid Starts", fmt_num(total_paid))
-    with cols[3]:
-        st.metric("Blended CPA", fmt_currency(blended_cpa))
-    with cols[4]:
+    blended_cpa_str = (f"${blended_cpa:,.2f}" if not np.isnan(blended_cpa) else "—")
+
+    row1 = st.columns(4)
+    with row1[0]:
+        st.metric("Spend", fmt_currency(total_spend))
+    with row1[1]:
+        st.metric("Trials", fmt_num(total_trials))
+    with row1[2]:
+        st.metric("Paid", fmt_num(total_paid))
+    with row1[3]:
+        st.metric("Blended CPA", blended_cpa_str)
+
+    row2 = st.columns(3)
+    with row2[0]:
         st.metric("Best Creative", best_creative)
-    with cols[5]:
-        st.metric("Scale Candidates", int(scale_n))
-    with cols[6]:
-        st.metric("Cut Candidates", int(cut_n))
+    with row2[1]:
+        st.metric("Scale", int(scale_n))
+    with row2[2]:
+        st.metric("Cut", int(cut_n))
 
 
 _DECISION_LABEL_COLORS = {
@@ -603,7 +607,7 @@ def render_ranking_table(df: pd.DataFrame):
 
     styler = sub.style
     if display_label in sub.columns:
-        styler = styler.applymap(_style_decision_cell, subset=[display_label])
+        styler = styler.map(_style_decision_cell, subset=[display_label])
 
     st.markdown(
         "<p style='font-size:0.8rem;color:#8A9BC8;margin-bottom:4px;'>"
