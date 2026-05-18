@@ -2,6 +2,8 @@ import streamlit as st
 import pandas as pd
 import numpy as np
 import plotly.express as px
+import plotly.subplots as psub
+import plotly.graph_objects as go
 from io import StringIO
 
 st.set_page_config(
@@ -772,6 +774,173 @@ def render_recommendations(df: pd.DataFrame):
 
 
 # ══════════════════════════════════════════════════════════════════════════════
+# EXPORT HELPERS
+# ══════════════════════════════════════════════════════════════════════════════
+
+_EXPORT_COL_LABELS = {
+    "creative_id": "Creative ID",
+    "platform": "Platform",
+    "format_concept": "Format / Concept",
+    "length": "Length",
+    "spend": "Spend ($)",
+    "paid_starts": "Paid Starts",
+    "trial_starts": "Trial Starts",
+    "cpa": "Cost / Paid Start ($)",
+    "cpt": "Cost / Trial Start ($)",
+    "trial_to_paid_cvr": "Trial→Paid CVR (%)",
+    "paid_per_1k": "Paid Starts / $1k",
+    "trial_per_1k": "Trial Starts / $1k",
+    "thumbstop_rate": "Thumbstop Rate (%)",
+    "hold_6s": "6s Hold Rate (%)",
+    "ctr": "CTR (%)",
+    "goal_score": "Goal Score",
+    "decision_label": "Decision",
+}
+
+
+def build_export_csv(df: pd.DataFrame, goal: str) -> bytes:
+    """Return a UTF-8 CSV byte string of the ranked dataframe, formatted for readability."""
+    present = [c for c in _EXPORT_COL_LABELS if c in df.columns]
+    out = df[present].copy().reset_index(drop=True)
+    out.index = out.index + 1
+    out.index.name = "Rank"
+
+    for col in ["spend", "cpa", "cpt"]:
+        if col in out.columns:
+            out[col] = out[col].apply(lambda v: round(v, 2) if pd.notna(v) else v)
+    for col in ["thumbstop_rate", "hold_6s", "ctr", "trial_to_paid_cvr"]:
+        if col in out.columns:
+            out[col] = out[col].apply(lambda v: round(v, 2) if pd.notna(v) else v)
+    for col in ["paid_per_1k", "trial_per_1k", "goal_score"]:
+        if col in out.columns:
+            out[col] = out[col].apply(lambda v: round(v, 4) if pd.notna(v) else v)
+
+    out = out.rename(columns=_EXPORT_COL_LABELS)
+    return out.to_csv().encode("utf-8")
+
+
+def build_charts_png(df: pd.DataFrame) -> bytes | None:
+    """Build a 2×2 Plotly subplot image and return PNG bytes. Returns None if data is insufficient."""
+    chart_bg = "#0E1117"
+    grid_color = "#1E2A45"
+    font_color = "#FAFAFA"
+    color_map = {"Meta": "#4F8EF7", "TikTok": "#34d399", "YouTube Shorts": "#fb923c"}
+
+    has_cpa = "cpa" in df.columns and "creative_id" in df.columns
+    has_paid = "paid_starts" in df.columns and "creative_id" in df.columns
+    has_scatter = "ctr" in df.columns and "cpa" in df.columns
+    has_platform = "platform" in df.columns
+
+    if not any([has_cpa, has_paid, has_scatter, has_platform]):
+        return None
+
+    fig = psub.make_subplots(
+        rows=2, cols=2,
+        subplot_titles=[
+            "Cost per Paid Start by Creative",
+            "Paid Starts by Creative",
+            "CTR vs Cost per Paid Start",
+            "Platform Performance Overview",
+        ],
+        vertical_spacing=0.18,
+        horizontal_spacing=0.10,
+    )
+
+    # 1 — CPA bar
+    if has_cpa:
+        d = df[["creative_id", "cpa"]].dropna().sort_values("cpa")
+        for _, row in d.iterrows():
+            pct = (row["cpa"] - d["cpa"].min()) / max(d["cpa"].max() - d["cpa"].min(), 1e-9)
+            r = int(52 + pct * (248 - 52))
+            g = int(211 - pct * (211 - 113))
+            b = int(153 - pct * (153 - 113))
+            fig.add_trace(
+                go.Bar(x=[row["creative_id"]], y=[row["cpa"]], marker_color=f"rgb({r},{g},{b})", showlegend=False),
+                row=1, col=1,
+            )
+        fig.add_hline(y=CPA_TARGET, line_dash="dash", line_color="#4F8EF7", row=1, col=1)
+
+    # 2 — Paid Starts bar
+    if has_paid:
+        d2 = df[["creative_id", "paid_starts", "platform"]].dropna(subset=["paid_starts"]).sort_values("paid_starts", ascending=False)
+        seen_platforms = set()
+        for _, row in d2.iterrows():
+            plat = row.get("platform", "Other")
+            color = color_map.get(plat, "#8A9BC8")
+            show = plat not in seen_platforms
+            seen_platforms.add(plat)
+            fig.add_trace(
+                go.Bar(x=[row["creative_id"]], y=[row["paid_starts"]], marker_color=color,
+                       name=plat, legendgroup=plat, showlegend=show),
+                row=1, col=2,
+            )
+
+    # 3 — Scatter CTR vs CPA
+    if has_scatter:
+        d3 = df[["creative_id", "ctr", "cpa", "spend", "platform"]].dropna(subset=["ctr", "cpa"])
+        spend_vals = d3["spend"].fillna(d3["spend"].median()) if "spend" in d3.columns else pd.Series([10] * len(d3))
+        size_norm = ((spend_vals - spend_vals.min()) / max(spend_vals.max() - spend_vals.min(), 1)) * 20 + 8
+        for i, (_, row) in enumerate(d3.iterrows()):
+            plat = row.get("platform", "Other")
+            color = color_map.get(plat, "#8A9BC8")
+            fig.add_trace(
+                go.Scatter(
+                    x=[row["cpa"]], y=[row["ctr"]],
+                    mode="markers+text",
+                    text=[row["creative_id"]],
+                    textposition="top center",
+                    marker=dict(size=float(size_norm.iloc[i]), color=color, opacity=0.85),
+                    showlegend=False,
+                ),
+                row=2, col=1,
+            )
+        fig.add_vline(x=CPA_TARGET, line_dash="dash", line_color="#4F8EF7", row=2, col=1)
+
+    # 4 — Platform grouped
+    if has_platform:
+        agg = {}
+        if "cpa" in df.columns:
+            agg["Avg CPA"] = ("cpa", "mean")
+        if "paid_starts" in df.columns:
+            agg["Total Paid Starts"] = ("paid_starts", "sum")
+        if "ctr" in df.columns:
+            agg["Avg CTR"] = ("ctr", "mean")
+        if "thumbstop_rate" in df.columns:
+            agg["Avg Thumbstop"] = ("thumbstop_rate", "mean")
+        if agg:
+            plat = df.groupby("platform").agg(**agg).reset_index()
+            metric_colors = ["#4F8EF7", "#34d399", "#fbbf24", "#fb923c"]
+            for mi, metric in enumerate([k for k in agg]):
+                fig.add_trace(
+                    go.Bar(
+                        x=plat["platform"], y=plat[metric],
+                        name=metric, marker_color=metric_colors[mi % len(metric_colors)],
+                        legendgroup=f"metric_{metric}", showlegend=True,
+                    ),
+                    row=2, col=2,
+                )
+            fig.update_layout(barmode="group")
+
+    fig.update_layout(
+        paper_bgcolor=chart_bg,
+        plot_bgcolor=chart_bg,
+        font=dict(color=font_color, size=11),
+        height=900,
+        width=1400,
+        title=dict(text="Creative Performance Summary", font=dict(size=16, color="#4F8EF7"), x=0.5),
+        margin=dict(t=60, b=40, l=60, r=60),
+    )
+    for axis in fig.layout:
+        if axis.startswith("xaxis") or axis.startswith("yaxis"):
+            fig.layout[axis].update(gridcolor=grid_color, bgcolor=chart_bg)
+
+    try:
+        return fig.to_image(format="png", scale=1.5)
+    except Exception:
+        return None
+
+
+# ══════════════════════════════════════════════════════════════════════════════
 # INTEGRATION PLACEHOLDER FUNCTIONS
 # ══════════════════════════════════════════════════════════════════════════════
 
@@ -1005,12 +1174,37 @@ def page_analyzer():
             if candidates:
                 st.success(f"🚀  **Scale Candidates** (CPA < ${CPA_TARGET}): {', '.join(str(c) for c in candidates)}")
 
-        st.markdown(f"<div class='section-header'>Creative Rankings — {goal}</div>", unsafe_allow_html=True)
+        rank_hdr_col, csv_btn_col = st.columns([5, 1])
+        with rank_hdr_col:
+            st.markdown(f"<div class='section-header'>Creative Rankings — {goal}</div>", unsafe_allow_html=True)
+        with csv_btn_col:
+            csv_bytes = build_export_csv(df_ranked, goal)
+            st.download_button(
+                label="⬇ Download CSV",
+                data=csv_bytes,
+                file_name=f"creative_rankings_{goal.lower().replace(' ', '_')}.csv",
+                mime="text/csv",
+                use_container_width=True,
+                key="dl_csv",
+            )
         render_ranking_table(df_ranked)
 
         st.divider()
 
-        st.markdown("<div class='section-header'>Visuals</div>", unsafe_allow_html=True)
+        chart_hdr_col, png_btn_col = st.columns([5, 1])
+        with chart_hdr_col:
+            st.markdown("<div class='section-header'>Visuals</div>", unsafe_allow_html=True)
+        with png_btn_col:
+            png_bytes = build_charts_png(df_ranked)
+            if png_bytes:
+                st.download_button(
+                    label="⬇ Download Charts",
+                    data=png_bytes,
+                    file_name="creative_charts_summary.png",
+                    mime="image/png",
+                    use_container_width=True,
+                    key="dl_png",
+                )
         render_charts(df_ranked)
 
         st.divider()
