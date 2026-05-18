@@ -141,13 +141,13 @@ def normalise_columns(df: pd.DataFrame) -> pd.DataFrame:
 
 def clean_numeric(series: pd.Series) -> pd.Series:
     """Strip $, commas and convert to float. Coerce non-numeric → NaN."""
-    return (
+    cleaned = (
         series.astype(str)
         .str.replace(r"[$,]", "", regex=True)
         .str.strip()
         .replace({"N/A": np.nan, "n/a": np.nan, "NA": np.nan, "-": np.nan, "": np.nan})
-        .astype(float, errors="ignore")
     )
+    return pd.to_numeric(cleaned, errors="coerce")
 
 
 def clean_percent(series: pd.Series) -> pd.Series:
@@ -165,8 +165,8 @@ def clean_percent(series: pd.Series) -> pd.Series:
                 result.append(float(v.replace("%", "").strip()))
             else:
                 val = float(v)
-                # If value looks like a decimal proportion (< 1.5), convert to %
-                if val < 1.5:
+                # Only scale if clearly a proportion (0 < v <= 1)
+                if 0 < val <= 1:
                     result.append(val * 100)
                 else:
                     result.append(val)
