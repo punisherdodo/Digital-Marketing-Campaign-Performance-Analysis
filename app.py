@@ -2,8 +2,7 @@ import streamlit as st
 import pandas as pd
 import numpy as np
 import plotly.express as px
-import plotly.graph_objects as go
-from io import StringIO, BytesIO
+from io import StringIO
 
 st.set_page_config(
     page_title="Creative Performance Analyzer",
@@ -177,7 +176,7 @@ def clean_percent(series: pd.Series) -> pd.Series:
 
 
 def extract_seconds(series: pd.Series) -> pd.Series:
-    """Convert length strings like '28s', '28', '0:28' to numeric seconds."""
+    """Convert length strings like '28s' or '28' to numeric seconds."""
     def parse(v):
         if pd.isna(v):
             return np.nan
@@ -474,58 +473,69 @@ def render_summary_cards(df: pd.DataFrame, goal: str):
         st.metric("Cut Candidates", int(cut_n))
 
 
+_DECISION_LABEL_COLORS = {
+    "Scale":        {"color": "#34d399", "background-color": "#1a4731"},
+    "Keep Testing": {"color": "#fbbf24", "background-color": "#3b3515"},
+    "Review":       {"color": "#f59e0b", "background-color": "#2e2a10"},
+    "Fix Funnel":   {"color": "#fb923c", "background-color": "#3b2200"},
+    "Cut":          {"color": "#f87171", "background-color": "#3b0a0a"},
+}
+
+
+def _style_decision_cell(val):
+    styles = _DECISION_LABEL_COLORS.get(val, {})
+    return "; ".join(f"{k}: {v}" for k, v in styles.items())
+
+
 def render_ranking_table(df: pd.DataFrame):
     display_cols_map = {
         "creative_id": "Creative ID",
         "platform": "Platform",
         "format_concept": "Format / Concept",
-        "spend": "Spend",
+        "spend": "Spend ($)",
         "paid_starts": "Paid Starts",
         "trial_starts": "Trial Starts",
-        "cpa": "Cost / Paid Start",
-        "cpt": "Cost / Trial Start",
-        "trial_to_paid_cvr": "Trial→Paid CVR",
-        "thumbstop_rate": "Thumbstop Rate",
-        "hold_6s": "6s Hold Rate",
-        "ctr": "CTR",
+        "cpa": "Cost / Paid Start ($)",
+        "cpt": "Cost / Trial Start ($)",
+        "trial_to_paid_cvr": "Trial→Paid CVR (%)",
+        "thumbstop_rate": "Thumbstop Rate (%)",
+        "hold_6s": "6s Hold Rate (%)",
+        "ctr": "CTR (%)",
         "decision_label": "Decision",
     }
+
     present = [c for c in display_cols_map if c in df.columns]
-    sub = df[present].copy()
+    sub = df[present].copy().reset_index(drop=True)
+    sub.index = sub.index + 1
+    sub.index.name = "Rank"
 
-    html_rows = []
-    for rank, (_, row) in enumerate(sub.iterrows(), start=1):
-        cells = [f"<td style='color:#8A9BC8;font-weight:600;'>{rank}</td>"]
-        for col in present:
-            val = row[col]
-            if col == "decision_label":
-                cells.append(f"<td>{badge_html(val)}</td>")
-            elif col == "spend":
-                cells.append(f"<td>{fmt_currency(val)}</td>")
-            elif col in ("cpa", "cpt"):
-                cells.append(f"<td>{fmt_currency(val)}</td>")
-            elif col in ("thumbstop_rate", "hold_6s", "ctr", "trial_to_paid_cvr"):
-                cells.append(f"<td>{fmt_pct(val)}</td>")
-            elif col in ("paid_starts", "trial_starts"):
-                cells.append(f"<td>{fmt_num(val)}</td>")
-            else:
-                cells.append(f"<td style='max-width:260px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;' title='{val}'>{val}</td>")
-        html_rows.append("<tr>" + "".join(cells) + "</tr>")
+    # Format display values
+    for col in ["spend", "cpa", "cpt"]:
+        if col in sub.columns:
+            sub[col] = sub[col].apply(lambda v: round(v, 2) if pd.notna(v) else v)
+    for col in ["thumbstop_rate", "hold_6s", "ctr", "trial_to_paid_cvr"]:
+        if col in sub.columns:
+            sub[col] = sub[col].apply(lambda v: round(v, 2) if pd.notna(v) else v)
 
-    headers = ["#"] + [display_cols_map[c] for c in present]
-    th_html = "".join(f"<th style='white-space:nowrap;padding:6px 12px;color:#4F8EF7;font-size:0.78rem;text-transform:uppercase;letter-spacing:0.06em;'>{h}</th>" for h in headers)
+    sub = sub.rename(columns=display_cols_map)
+    display_label = display_cols_map.get("decision_label", "Decision")
 
-    table_html = f"""
-    <div style="overflow-x:auto; margin-top:8px;">
-    <table style="width:100%;border-collapse:collapse;font-size:0.88rem;">
-      <thead><tr style="border-bottom:1px solid #2A3350;">{th_html}</tr></thead>
-      <tbody>
-        {"".join(html_rows)}
-      </tbody>
-    </table>
-    </div>
-    """
-    st.markdown(table_html, unsafe_allow_html=True)
+    styler = sub.style
+    if display_label in sub.columns:
+        styler = styler.applymap(_style_decision_cell, subset=[display_label])
+
+    st.markdown(
+        "<p style='font-size:0.8rem;color:#8A9BC8;margin-bottom:4px;'>"
+        "Click any column header to sort. "
+        "<span style='color:#34d399'>■</span> Scale &nbsp;"
+        "<span style='color:#fbbf24'>■</span> Keep Testing &nbsp;"
+        "<span style='color:#f59e0b'>■</span> Review &nbsp;"
+        "<span style='color:#fb923c'>■</span> Fix Funnel &nbsp;"
+        "<span style='color:#f87171'>■</span> Cut"
+        "</p>",
+        unsafe_allow_html=True,
+    )
+    st.dataframe(styler, use_container_width=True, height=400)
 
 
 def render_charts(df: pd.DataFrame):
