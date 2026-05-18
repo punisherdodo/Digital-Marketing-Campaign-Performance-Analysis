@@ -1694,6 +1694,7 @@ def page_analyzer(
             "Upload CSV or Excel file",
             type=["csv", "xlsx", "xls"],
             help="Columns like Creative ID, Platform, Spend, Thumbstop Rate, CTR, Trial Starts, Paid Starts",
+            key=f"uploader_{st.session_state.uploader_key}",
         )
     with sample_col:
         st.write("")
@@ -1741,6 +1742,7 @@ def page_analyzer(
             if st.button("🗑 Clear analysis", use_container_width=True, key="btn_clear_analysis"):
                 for _k in ("df_raw", "sheets_df", "warnings", "loaded_goal"):
                     st.session_state[_k] = None
+                st.session_state.uploader_key += 1
                 st.rerun()
 
         df_ranked = rank_by_goal(df, goal, cpa_target=cpa_target, ce_weights=ce_weights, ffq_weights=ffq_weights)
@@ -2222,6 +2224,8 @@ if "sheets_df" not in st.session_state:
     st.session_state.sheets_df = None
 if "loaded_goal" not in st.session_state:
     st.session_state.loaded_goal = None
+if "uploader_key" not in st.session_state:
+    st.session_state.uploader_key = 0
 if "pending_load_id" not in st.session_state:
     st.session_state.pending_load_id = None
 if "pending_delete_id" not in st.session_state:
