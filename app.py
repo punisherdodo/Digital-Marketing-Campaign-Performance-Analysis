@@ -1054,6 +1054,65 @@ def _pdf_safe(text: str) -> str:
     return text.encode("latin-1", errors="replace").decode("latin-1")
 
 
+def sanitize_pdf_text(text) -> str:
+    """Comprehensive sanitiser: replace every non-Helvetica character with a
+    safe ASCII equivalent, then encode/decode to catch anything remaining."""
+    if text is None:
+        return ""
+    text = str(text)
+    replacements = {
+        "\u2022": "-",    # bullet
+        "\u2013": "-",    # en dash
+        "\u2014": "-",    # em dash
+        "\u2015": "-",    # horizontal bar
+        "\u2212": "-",    # minus sign
+        "\u2018": "'",    # left single quote
+        "\u2019": "'",    # right single quote
+        "\u201c": '"',    # left double quote
+        "\u201d": '"',    # right double quote
+        "\u2026": "...",  # ellipsis
+        "\u2192": "->",   # right arrow
+        "\u2190": "<-",   # left arrow
+        "\u2264": "<=",   # less-than-or-equal
+        "\u2265": ">=",   # greater-than-or-equal
+        "\u00a0": " ",    # non-breaking space
+        "\u00ae": "(R)",  # registered trademark
+        "\u2122": "(TM)", # trademark
+        "\u00a9": "(c)",  # copyright
+        "\u00b0": " deg", # degree sign
+        "\u00b7": "-",    # middle dot
+    }
+    for old, new in replacements.items():
+        text = text.replace(old, new)
+    # Final pass: encode to latin-1, replacing any remaining unsupported chars
+    # with "?" then convert those replacement markers to hyphens.
+    encoded = text.encode("latin-1", "replace").decode("latin-1")
+    # Only replace '?' chars that were substituted (not original question marks)
+    # by comparing char-by-char with the original encoded result.
+    result = []
+    for orig_ch, enc_ch in zip(text, encoded):
+        if enc_ch == "?" and orig_ch != "?":
+            result.append("-")
+        else:
+            result.append(enc_ch)
+    # Handle length differences (substitutions that expand/contract)
+    if len(encoded) > len(text):
+        result.extend(encoded[len(text):])
+    return "".join(result)
+
+
+def _pdf_cell(pdf, w, h, txt="", border=0, ln=0, align="", fill=False):
+    """pdf.cell wrapper that sanitises text before writing."""
+    pdf.cell(w, h, sanitize_pdf_text(txt), border=border, ln=ln,
+             align=align, fill=fill)
+
+
+def _pdf_multi_cell(pdf, w, h, txt="", border=0, align="", fill=False):
+    """pdf.multi_cell wrapper that sanitises text before writing."""
+    pdf.multi_cell(w, h, sanitize_pdf_text(txt), border=border,
+                   align=align, fill=fill)
+
+
 def get_patterns_text(df: pd.DataFrame) -> list:
     items = []
     if "platform" in df.columns and "cpa" in df.columns:
@@ -1163,9 +1222,9 @@ class _PDF(FPDF):
         self.cell(120, 10, "Creative Performance Analyzer", ln=False)
         self.set_font("Helvetica", "", 9)
         self.set_xy(135, 4)
-        self.cell(60, 5, f"Goal: {self._goal}", ln=False, align="R")
+        self.cell(60, 5, sanitize_pdf_text(f"Goal: {self._goal}"), ln=False, align="R")
         self.set_xy(135, 9)
-        self.cell(60, 5, f"Generated: {self._report_date}", ln=False, align="R")
+        self.cell(60, 5, sanitize_pdf_text(f"Generated: {self._report_date}"), ln=False, align="R")
         self.set_text_color(0, 0, 0)
         self.set_xy(15, 22)
 
@@ -1173,13 +1232,13 @@ class _PDF(FPDF):
         self.set_y(-12)
         self.set_font("Helvetica", "I", 8)
         self.set_text_color(150, 150, 150)
-        self.cell(0, 5, f"Page {self.page_no()} — Creative Performance Analyzer", align="C")
+        self.cell(0, 5, sanitize_pdf_text(f"Page {self.page_no()} - Creative Performance Analyzer"), align="C")
         self.set_text_color(0, 0, 0)
 
     def section_title(self, title: str):
         self.set_font("Helvetica", "B", 10)
         self.set_text_color(30, 58, 138)
-        self.cell(0, 7, _pdf_safe(title).upper(), ln=True)
+        self.cell(0, 7, sanitize_pdf_text(title).upper(), ln=True)
         self.set_draw_color(30, 58, 138)
         self.set_line_width(0.4)
         self.line(15, self.get_y(), 195, self.get_y())
@@ -1227,11 +1286,11 @@ def build_pdf_report(df: pd.DataFrame, goal: str, cpa_target: float) -> bytes:
         pdf.set_xy(x, y + 1)
         pdf.set_font("Helvetica", "", 6.5)
         pdf.set_text_color(100, 116, 139)
-        pdf.cell(card_w - 1, 4, label, align="C")
+        _pdf_cell(pdf, card_w - 1, 4, label, align="C")
         pdf.set_xy(x, y + 5.5)
         pdf.set_font("Helvetica", "B", 9)
         pdf.set_text_color(15, 23, 42)
-        pdf.cell(card_w - 1, 6, value, align="C")
+        _pdf_cell(pdf, card_w - 1, 6, value, align="C")
     pdf.ln(card_h + 4)
     pdf.set_text_color(0, 0, 0)
 
@@ -1261,7 +1320,7 @@ def build_pdf_report(df: pd.DataFrame, goal: str, cpa_target: float) -> bytes:
         pdf.set_text_color(255, 255, 255)
         pdf.set_font("Helvetica", "B", 7.5)
         for col_label, col_w, _ in tbl_cols:
-            pdf.cell(col_w, header_h, col_label, border=0, fill=True, align="C")
+            _pdf_cell(pdf, col_w, header_h, col_label, border=0, fill=True, align="C")
         pdf.ln(header_h)
         pdf.set_text_color(0, 0, 0)
 
@@ -1304,8 +1363,8 @@ def build_pdf_report(df: pd.DataFrame, goal: str, cpa_target: float) -> bytes:
                 pdf.set_text_color(30, 41, 59)
 
             pdf.set_font("Helvetica", "B" if key == "decision_label" else "", 7)
-            safe_val = _pdf_safe(val)[:22]
-            pdf.cell(col_w, row_h, safe_val, border=0, fill=True, align=align)
+            safe_val = sanitize_pdf_text(val)[:22]
+            _pdf_cell(pdf, col_w, row_h, safe_val, border=0, fill=True, align=align)
         pdf.ln(row_h)
 
     pdf.set_text_color(0, 0, 0)
@@ -1315,7 +1374,7 @@ def build_pdf_report(df: pd.DataFrame, goal: str, cpa_target: float) -> bytes:
     pdf.section_title("Charts")
     pdf.set_font("Helvetica", "I", 8.5)
     pdf.set_text_color(100, 116, 139)
-    pdf.multi_cell(0, 5.5, "Interactive charts are displayed in the app. Download individual chart data as CSV using the buttons in the Visuals section.", border=0)
+    _pdf_multi_cell(pdf, 0, 5.5, "Interactive charts are displayed in the app. Download individual chart data as CSV using the buttons in the Visuals section.", border=0)
     pdf.set_text_color(0, 0, 0)
     pdf.ln(3)
 
@@ -1334,8 +1393,8 @@ def build_pdf_report(df: pd.DataFrame, goal: str, cpa_target: float) -> bytes:
             pdf.set_x(15)
             pdf.set_draw_color(59, 130, 246)
             pdf.set_line_width(0.8)
-            text = _pdf_safe(item)
-            pdf.multi_cell(0, 5.5, f"  {text}", border="L", fill=True)
+            text = sanitize_pdf_text(item)
+            _pdf_multi_cell(pdf, 0, 5.5, f"  {text}", border="L", fill=True)
             pdf.ln(1.5)
         pdf.set_draw_color(0, 0, 0)
         pdf.set_line_width(0.2)
@@ -1356,8 +1415,8 @@ def build_pdf_report(df: pd.DataFrame, goal: str, cpa_target: float) -> bytes:
             pdf.set_x(15)
             pdf.set_draw_color(34, 197, 94)
             pdf.set_line_width(0.8)
-            text = _pdf_safe(rec)
-            pdf.multi_cell(0, 5.5, f"  >>  {text}", border="L", fill=True)
+            text = sanitize_pdf_text(rec)
+            _pdf_multi_cell(pdf, 0, 5.5, f"  >>  {text}", border="L", fill=True)
             pdf.ln(1.5)
 
     return bytes(pdf.output())
@@ -1745,25 +1804,24 @@ def page_analyzer(
 
         st.divider()
 
-        rec_hdr_col, pdf_btn_col = st.columns([5, 1])
-        with rec_hdr_col:
-            st.markdown("<div class='section-header'>What should we test next?</div>", unsafe_allow_html=True)
-        with pdf_btn_col:
-            try:
-                pdf_bytes = build_pdf_report(df_ranked, goal, cpa_target)
-                today_str = datetime.date.today().strftime("%Y-%m-%d")
-                safe_goal = re.sub(r"[^\w]+", "_", goal.lower()).strip("_")
-                st.download_button(
-                    label="⬇ Download PDF Report",
-                    data=pdf_bytes,
-                    file_name=f"creative_report_{safe_goal}_{today_str}.pdf",
-                    mime="application/pdf",
-                    use_container_width=True,
-                    key="dl_pdf",
-                )
-            except Exception as _pdf_err:
-                st.warning(f"PDF export unavailable: {_pdf_err}")
+        st.markdown("<div class='section-header'>What should we test next?</div>", unsafe_allow_html=True)
         render_recommendations(df_ranked)
+
+        st.divider()
+        try:
+            pdf_bytes = build_pdf_report(df_ranked, goal, cpa_target)
+            today_str = datetime.date.today().strftime("%Y-%m-%d")
+            safe_goal = re.sub(r"[^\w]+", "_", goal.lower()).strip("_")
+            st.download_button(
+                label="⬇ Download PDF Report",
+                data=pdf_bytes,
+                file_name=f"creative_report_{safe_goal}_{today_str}.pdf",
+                mime="application/pdf",
+                use_container_width=True,
+                key="dl_pdf",
+            )
+        except Exception as _pdf_err:
+            st.error(f"PDF export failed: {_pdf_err}")
 
     else:
         st.markdown(
