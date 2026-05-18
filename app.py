@@ -1035,8 +1035,15 @@ _UNICODE_REPLACE = str.maketrans({
     "\u2019": "'",   # right single quote
     "\u201c": '"',   # left double quote
     "\u201d": '"',   # right double quote
-    "\u2022": "*",   # bullet
-    "\u00b7": "*",   # middle dot
+    "\u2022": "-",   # bullet -> hyphen
+    "\u00b7": "-",   # middle dot -> hyphen
+    "\u2192": "->",  # right arrow (used in Trial->Paid CVR)
+    "\u2190": "<-",  # left arrow
+    "\u2264": "<=",  # less-than-or-equal
+    "\u2265": ">=",  # greater-than-or-equal
+    "\u00a9": "(c)", # copyright
+    "\u00ae": "(R)", # registered
+    "\u00b0": " deg",# degree
 })
 
 
@@ -1172,7 +1179,7 @@ class _PDF(FPDF):
     def section_title(self, title: str):
         self.set_font("Helvetica", "B", 10)
         self.set_text_color(30, 58, 138)
-        self.cell(0, 7, title.upper(), ln=True)
+        self.cell(0, 7, _pdf_safe(title).upper(), ln=True)
         self.set_draw_color(30, 58, 138)
         self.set_line_width(0.4)
         self.line(15, self.get_y(), 195, self.get_y())
@@ -1304,24 +1311,13 @@ def build_pdf_report(df: pd.DataFrame, goal: str, cpa_target: float) -> bytes:
     pdf.set_text_color(0, 0, 0)
     pdf.ln(4)
 
-    # ── 3. Chart image ───────────────────────────────────────────────────────
-    png_result = build_charts_png(df)
-    pdf.section_title("Chart Summary")
-    if isinstance(png_result, bytes) and png_result:
-        img_buf = BytesIO(png_result)
-        img_w = 180
-        img_h = round(img_w * 900 / 1400)
-        if pdf.get_y() + img_h > 270:
-            pdf.add_page()
-        pdf.image(img_buf, x=15, y=pdf.get_y(), w=img_w)
-        pdf.ln(img_h + 4)
-    else:
-        pdf.set_font("Helvetica", "I", 8.5)
-        pdf.set_text_color(120, 120, 120)
-        reason = str(png_result) if isinstance(png_result, Exception) else "insufficient data"
-        pdf.cell(0, 7, f"Chart unavailable ({reason})", ln=True)
-        pdf.set_text_color(0, 0, 0)
-        pdf.ln(2)
+    # ── 3. Chart note (no kaleido/Chrome dependency) ─────────────────────────
+    pdf.section_title("Charts")
+    pdf.set_font("Helvetica", "I", 8.5)
+    pdf.set_text_color(100, 116, 139)
+    pdf.multi_cell(0, 5.5, "Interactive charts are displayed in the app. Download individual chart data as CSV using the buttons in the Visuals section.", border=0)
+    pdf.set_text_color(0, 0, 0)
+    pdf.ln(3)
 
     # ── 4. Pattern analysis ──────────────────────────────────────────────────
     patterns = get_patterns_text(df)
@@ -1365,6 +1361,93 @@ def build_pdf_report(df: pd.DataFrame, goal: str, cpa_target: float) -> bytes:
             pdf.ln(1.5)
 
     return bytes(pdf.output())
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# CHART CSV DOWNLOADS
+# ══════════════════════════════════════════════════════════════════════════════
+
+def render_chart_csv_downloads(df: pd.DataFrame):
+    """Offer CSV downloads for the underlying data behind each of the 4 charts."""
+    st.info(
+        "Chart image export is disabled in this prototype. "
+        "Download the underlying chart data as CSV using the buttons below."
+    )
+    dl_cols = st.columns(4)
+
+    # 1 — CPA by Creative
+    with dl_cols[0]:
+        if "creative_id" in df.columns and "cpa" in df.columns:
+            d = df[["creative_id", "cpa"]].dropna().sort_values("cpa").rename(
+                columns={"creative_id": "Creative ID", "cpa": "CPA ($)"}
+            )
+            st.download_button(
+                label="⬇ CPA by Creative",
+                data=d.to_csv(index=False).encode("utf-8"),
+                file_name="chart_cpa_by_creative.csv",
+                mime="text/csv",
+                use_container_width=True,
+                key="dl_chart_cpa",
+            )
+
+    # 2 — Paid Starts by Creative
+    with dl_cols[1]:
+        if "creative_id" in df.columns and "paid_starts" in df.columns:
+            cols_present = [c for c in ["creative_id", "platform", "paid_starts"] if c in df.columns]
+            d = df[cols_present].dropna(subset=["paid_starts"]).sort_values(
+                "paid_starts", ascending=False
+            ).rename(columns={"creative_id": "Creative ID", "platform": "Platform", "paid_starts": "Paid Starts"})
+            st.download_button(
+                label="⬇ Paid Starts",
+                data=d.to_csv(index=False).encode("utf-8"),
+                file_name="chart_paid_starts.csv",
+                mime="text/csv",
+                use_container_width=True,
+                key="dl_chart_paid",
+            )
+
+    # 3 — CTR vs CPA scatter
+    with dl_cols[2]:
+        if "ctr" in df.columns and "cpa" in df.columns:
+            cols_present = [c for c in ["creative_id", "platform", "ctr", "cpa", "spend", "decision_label"] if c in df.columns]
+            d = df[cols_present].dropna(subset=["ctr", "cpa"]).rename(columns={
+                "creative_id": "Creative ID", "platform": "Platform",
+                "ctr": "CTR (%)", "cpa": "CPA ($)", "spend": "Spend ($)",
+                "decision_label": "Decision",
+            })
+            st.download_button(
+                label="⬇ CTR vs CPA",
+                data=d.to_csv(index=False).encode("utf-8"),
+                file_name="chart_ctr_vs_cpa.csv",
+                mime="text/csv",
+                use_container_width=True,
+                key="dl_chart_scatter",
+            )
+
+    # 4 — Platform summary
+    with dl_cols[3]:
+        if "platform" in df.columns:
+            agg = {}
+            if "cpa" in df.columns:
+                agg["Avg CPA ($)"] = ("cpa", "mean")
+            if "paid_starts" in df.columns:
+                agg["Total Paid Starts"] = ("paid_starts", "sum")
+            if "ctr" in df.columns:
+                agg["Avg CTR (%)"] = ("ctr", "mean")
+            if "thumbstop_rate" in df.columns:
+                agg["Avg Thumbstop (%)"] = ("thumbstop_rate", "mean")
+            if agg:
+                d = df.groupby("platform").agg(**agg).reset_index().rename(
+                    columns={"platform": "Platform"}
+                )
+                st.download_button(
+                    label="⬇ Platform Summary",
+                    data=d.to_csv(index=False).encode("utf-8"),
+                    file_name="chart_platform_summary.csv",
+                    mime="text/csv",
+                    use_container_width=True,
+                    key="dl_chart_platform",
+                )
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -1651,23 +1734,9 @@ def page_analyzer(
 
         st.divider()
 
-        chart_hdr_col, png_btn_col = st.columns([5, 1])
-        with chart_hdr_col:
-            st.markdown("<div class='section-header'>Visuals</div>", unsafe_allow_html=True)
-        with png_btn_col:
-            png_result = build_charts_png(df_ranked)
-            if isinstance(png_result, Exception):
-                st.warning(f"Chart export unavailable: {png_result}")
-            elif png_result:
-                st.download_button(
-                    label="⬇ Download Chart Summary as PNG",
-                    data=png_result,
-                    file_name="creative_charts_summary.png",
-                    mime="image/png",
-                    use_container_width=True,
-                    key="dl_png",
-                )
+        st.markdown("<div class='section-header'>Visuals</div>", unsafe_allow_html=True)
         render_charts(df_ranked, cpa_target=cpa_target)
+        render_chart_csv_downloads(df_ranked)
 
         st.divider()
 

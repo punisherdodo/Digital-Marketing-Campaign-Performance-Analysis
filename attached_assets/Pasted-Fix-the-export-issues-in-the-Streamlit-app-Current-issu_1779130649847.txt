@@ -1,0 +1,114 @@
+Fix the export issues in the Streamlit app.
+
+Current issues:
+1. Chart export shows:
+"Kaleido requires Google Chrome to be installed."
+
+2. PDF export shows:
+'Character "•" at index 7 in text is outside the range of characters supported by the font used: "helvetica". Please consider using a Unicode font.'
+
+Fix both issues without breaking the analyzer.
+
+PART 1: Chart export fix
+
+Do not rely on Kaleido image export in Replit.
+
+Remove or disable any chart export feature that uses:
+fig.write_image()
+plotly.io.write_image()
+kaleido
+
+Instead:
+- Keep charts visible inside Streamlit.
+- Add CSV download buttons for the underlying chart data.
+- Add a note:
+"Chart image export is disabled in this Replit prototype. You can still download the underlying chart data as CSV."
+
+For every chart section, provide a CSV download button for the data used in the chart:
+- CPA by Creative ID
+- Paid Starts by Creative ID
+- CTR vs CPA scatter data
+- Platform summary data
+
+Use st.download_button with data converted to CSV.
+
+Do not show a broken Kaleido warning box.
+Do not ask the user to install Chrome.
+Do not use Chrome-dependent export.
+
+PART 2: PDF export fix
+
+The PDF export is failing because Helvetica does not support some Unicode characters.
+
+Fix the PDF export by sanitizing text before writing to PDF.
+
+Create a helper function:
+
+def sanitize_pdf_text(text):
+    if text is None:
+        return ""
+    text = str(text)
+    replacements = {
+        "•": "-",
+        "–": "-",
+        "—": "-",
+        "“": '"',
+        "”": '"',
+        "‘": "'",
+        "’": "'",
+        "…": "...",
+        "→": "->",
+        "≤": "<=",
+        "≥": ">=",
+    }
+    for old, new in replacements.items():
+        text = text.replace(old, new)
+    return text
+
+Apply sanitize_pdf_text() to every text string before writing it into the PDF.
+
+This includes:
+- Titles
+- Section headers
+- KPI labels
+- Recommendation text
+- Decision labels
+- Methodology text
+- Pattern analysis text
+- Any bullet list text
+
+Also replace bullet lists in the PDF with simple hyphen lines instead of bullet characters.
+
+Example:
+Instead of:
+• Scale C05
+Use:
+- Scale C05
+
+PART 3: Layout fix for export warning cards
+
+The current warning cards are very narrow and the text wraps one word per line.
+
+If any export warning remains:
+- Make the warning box full width.
+- Use st.warning() or st.info() instead of a custom narrow card.
+- Do not place export warnings inside small columns.
+
+PART 4: Keep functionality stable
+
+Do not change:
+- KPI formulas
+- Ranking logic
+- Decision label logic
+- Upload logic
+- Google Sheets import logic
+- Integrations page structure
+
+After fixing, verify:
+- App runs without crashing.
+- Visuals still render.
+- No Kaleido/Chrome warning appears.
+- CSV downloads work for chart data.
+- PDF export works.
+- PDF text does not include unsupported bullet characters.
+- C05 still ranks first under Efficient Paid Starts.
