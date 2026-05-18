@@ -1,10 +1,13 @@
+import re
+import datetime
 import streamlit as st
 import pandas as pd
 import numpy as np
 import plotly.express as px
 import plotly.subplots as psub
 import plotly.graph_objects as go
-from io import StringIO
+from io import StringIO, BytesIO
+from fpdf import FPDF
 
 st.set_page_config(
     page_title="Creative Performance Analyzer",
@@ -949,12 +952,344 @@ def build_charts_png(df: pd.DataFrame) -> bytes | None:
     )
     for axis in fig.layout:
         if axis.startswith("xaxis") or axis.startswith("yaxis"):
-            fig.layout[axis].update(gridcolor=grid_color, bgcolor=chart_bg)
+            fig.layout[axis].update(gridcolor=grid_color)
 
     try:
         return fig.to_image(format="png", scale=1.5)
     except Exception as e:
         return e
+
+
+def _strip_html(text: str) -> str:
+    return re.sub(r"<[^>]+>", "", text).strip()
+
+
+_UNICODE_REPLACE = str.maketrans({
+    "\u2014": "-",   # em dash
+    "\u2013": "-",   # en dash
+    "\u2026": "...", # ellipsis
+    "\u2018": "'",   # left single quote
+    "\u2019": "'",   # right single quote
+    "\u201c": '"',   # left double quote
+    "\u201d": '"',   # right double quote
+    "\u2022": "*",   # bullet
+    "\u00b7": "*",   # middle dot
+})
+
+
+def _pdf_safe(text: str) -> str:
+    """Strip HTML, replace non-Latin-1 chars with ASCII equivalents."""
+    text = _strip_html(text)
+    text = text.translate(_UNICODE_REPLACE)
+    return text.encode("latin-1", errors="replace").decode("latin-1")
+
+
+def get_patterns_text(df: pd.DataFrame) -> list:
+    items = []
+    if "platform" in df.columns and "cpa" in df.columns:
+        plat_cpa = df.groupby("platform")["cpa"].mean().dropna()
+        if not plat_cpa.empty:
+            best = plat_cpa.idxmin()
+            worst = plat_cpa.idxmax()
+            items.append(f"{best} has the lowest avg CPA at {fmt_currency(plat_cpa[best])} — best platform for efficient paid starts.")
+            if best != worst:
+                items.append(f"{worst} has the highest avg CPA at {fmt_currency(plat_cpa[worst])} — review spend allocation.")
+    if "platform" in df.columns and "paid_starts" in df.columns:
+        plat_paid = df.groupby("platform")["paid_starts"].sum().dropna()
+        if not plat_paid.empty:
+            best = plat_paid.idxmax()
+            items.append(f"{best} drives the most paid starts in total ({fmt_num(plat_paid[best])}).")
+    if "format_concept" in df.columns and "cpa" in df.columns:
+        concept_cpa = df.groupby("format_concept")["cpa"].mean().dropna()
+        if not concept_cpa.empty:
+            best_c = concept_cpa.idxmin()
+            short = best_c[:60] + "…" if len(best_c) > 60 else best_c
+            items.append(f'Best concept by CPA: "{short}" at {fmt_currency(concept_cpa[best_c])}.')
+    if "platform" in df.columns and "cpa" in df.columns:
+        plat_cpa = df.groupby("platform")["cpa"].mean().dropna()
+        rows = " | ".join(f"{p}: {fmt_currency(v)}" for p, v in plat_cpa.items())
+        items.append(f"Average CPA by platform — {rows}")
+    if "length_s" in df.columns and "cpa" in df.columns:
+        d = df.dropna(subset=["length_s", "cpa"]).copy()
+        d["bucket"] = d["length_s"].apply(length_bucket)
+        bucket_cpa = d.groupby("bucket")["cpa"].mean().dropna()
+        ORDER = ["Under 20s", "20–30s", "31–40s", "Over 40s"]
+        bucket_cpa = bucket_cpa.reindex([b for b in ORDER if b in bucket_cpa.index])
+        if not bucket_cpa.empty:
+            rows = " | ".join(f"{b}: {fmt_currency(v)}" for b, v in bucket_cpa.items())
+            items.append(f"Average CPA by length — {rows}")
+            items.append(f"{bucket_cpa.idxmin()} creatives have the lowest average CPA.")
+    return items
+
+
+def get_recommendations_text(df: pd.DataFrame) -> list:
+    recs = []
+    if "platform" in df.columns and "thumbstop_rate" in df.columns and "cpa" in df.columns:
+        plat = df.groupby("platform").agg(
+            thumbstop=("thumbstop_rate", "mean"),
+            cpa=("cpa", "mean"),
+        ).dropna()
+        has_tiktok = "TikTok" in plat.index
+        has_meta = "Meta" in plat.index
+        if has_tiktok and has_meta:
+            if plat.loc["TikTok", "thumbstop"] > plat.loc["Meta", "thumbstop"] and plat.loc["TikTok", "cpa"] > plat.loc["Meta", "cpa"]:
+                recs.append("TikTok hooks are stopping scrolls but not converting. Test stronger product proof, clearer CTA, or a harder offer in the last 5 seconds.")
+            if plat.loc["Meta", "thumbstop"] < plat.loc["TikTok", "thumbstop"] and plat.loc["Meta", "cpa"] < plat.loc["TikTok", "cpa"]:
+                recs.append("Meta converts better despite lower thumbstop. Test more scroll-stopping hooks on Meta while keeping the same proven offer.")
+    if "ctr" in df.columns and "cpa" in df.columns:
+        med_ctr = df["ctr"].median()
+        med_cpa = df["cpa"].median()
+        hchp = df[(df["ctr"] > med_ctr) & (df["cpa"] > med_cpa)]
+        if not hchp.empty:
+            ids = ", ".join(hchp["creative_id"].astype(str).tolist())
+            recs.append(f"Creatives {ids} have strong CTR but high CPA — drop-off is likely in the landing page or trial-to-paid flow. Test a more direct offer page.")
+    if "thumbstop_rate" in df.columns and "ctr" in df.columns:
+        med_t = df["thumbstop_rate"].median()
+        med_c = df["ctr"].median()
+        htlc = df[(df["thumbstop_rate"] > med_t) & (df["ctr"] < med_c)]
+        if not htlc.empty:
+            ids = ", ".join(htlc["creative_id"].astype(str).tolist())
+            recs.append(f"Creatives {ids} stop the scroll but don't earn the click. Test a clearer value proposition in the first 3 seconds.")
+    if "format_concept" in df.columns and "cpa" in df.columns:
+        concept_cpa = df.groupby("format_concept")["cpa"].mean().dropna()
+        if not concept_cpa.empty and len(concept_cpa) > 1:
+            best_c = concept_cpa.idxmin()
+            short = best_c[:60] + "…" if len(best_c) > 60 else best_c
+            pct = (concept_cpa.mean() - concept_cpa.min()) / concept_cpa.mean() * 100
+            recs.append(f'Concept "{short}" has the lowest CPA — {pct:.0f}% below average. Remix this format across other platforms.')
+    if "platform" in df.columns and "cpa" in df.columns:
+        plat_cpa = df.groupby("platform")["cpa"].mean().dropna()
+        if len(plat_cpa) > 1:
+            worst = plat_cpa.idxmax()
+            best = plat_cpa.idxmin()
+            recs.append(f"Consider shifting budget from {worst} (avg CPA {fmt_currency(plat_cpa[worst])}) toward {best} (avg CPA {fmt_currency(plat_cpa[best])}).")
+    return recs
+
+
+# ── Decision label colours for PDF table (RGB tuples: text, fill) ────────────
+_PDF_DECISION_COLORS = {
+    "Scale":        ((22, 101, 52),   (220, 252, 231)),
+    "Keep Testing": ((146, 64, 14),   (254, 243, 199)),
+    "Fix Funnel":   ((154, 52, 18),   (255, 237, 213)),
+    "Cut":          ((153, 27, 27),   (254, 226, 226)),
+    "Review":       ((120, 53, 15),   (254, 249, 195)),
+}
+
+
+class _PDF(FPDF):
+    def __init__(self, goal: str, report_date: str):
+        super().__init__(orientation="P", unit="mm", format="A4")
+        self._goal = goal
+        self._report_date = report_date
+        self.set_margins(15, 15, 15)
+        self.set_auto_page_break(auto=True, margin=15)
+
+    def header(self):
+        self.set_fill_color(30, 58, 138)
+        self.rect(0, 0, 210, 18, "F")
+        self.set_font("Helvetica", "B", 12)
+        self.set_text_color(255, 255, 255)
+        self.set_xy(15, 4)
+        self.cell(120, 10, "Creative Performance Analyzer", ln=False)
+        self.set_font("Helvetica", "", 9)
+        self.set_xy(135, 4)
+        self.cell(60, 5, f"Goal: {self._goal}", ln=False, align="R")
+        self.set_xy(135, 9)
+        self.cell(60, 5, f"Generated: {self._report_date}", ln=False, align="R")
+        self.set_text_color(0, 0, 0)
+        self.set_xy(15, 22)
+
+    def footer(self):
+        self.set_y(-12)
+        self.set_font("Helvetica", "I", 8)
+        self.set_text_color(150, 150, 150)
+        self.cell(0, 5, f"Page {self.page_no()} — Creative Performance Analyzer", align="C")
+        self.set_text_color(0, 0, 0)
+
+    def section_title(self, title: str):
+        self.set_font("Helvetica", "B", 10)
+        self.set_text_color(30, 58, 138)
+        self.cell(0, 7, title.upper(), ln=True)
+        self.set_draw_color(30, 58, 138)
+        self.set_line_width(0.4)
+        self.line(15, self.get_y(), 195, self.get_y())
+        self.ln(3)
+        self.set_text_color(0, 0, 0)
+        self.set_draw_color(0, 0, 0)
+        self.set_line_width(0.2)
+
+
+def build_pdf_report(df: pd.DataFrame, goal: str, cpa_target: float) -> bytes:
+    today = datetime.date.today().strftime("%B %d, %Y")
+    pdf = _PDF(goal=goal, report_date=today)
+    pdf.add_page()
+
+    # ── 1. Summary cards ────────────────────────────────────────────────────
+    total_spend = df["spend"].sum() if "spend" in df.columns else float("nan")
+    total_trials = df["trial_starts"].sum() if "trial_starts" in df.columns else float("nan")
+    total_paid = df["paid_starts"].sum() if "paid_starts" in df.columns else float("nan")
+    blended_cpa = (total_spend / total_paid) if (pd.notna(total_spend) and total_paid) else float("nan")
+    best_creative = str(df.iloc[0]["creative_id"]) if (not df.empty and "creative_id" in df.columns) else "—"
+    scale_n = int((df["decision_label"] == "Scale").sum()) if "decision_label" in df.columns else 0
+    cut_n = int((df["decision_label"] == "Cut").sum()) if "decision_label" in df.columns else 0
+
+    cards = [
+        ("Total Spend", fmt_currency(total_spend)),
+        ("Trial Starts", fmt_num(total_trials)),
+        ("Paid Starts", fmt_num(total_paid)),
+        ("Blended CPA", fmt_currency(blended_cpa)),
+        ("Best Creative", best_creative),
+        ("Scale Candidates", str(scale_n)),
+        ("Cut Candidates", str(cut_n)),
+    ]
+
+    pdf.section_title("Performance Summary")
+    card_w = 180 / 7
+    card_h = 14
+    x0 = 15
+    for i, (label, value) in enumerate(cards):
+        x = x0 + i * card_w
+        y = pdf.get_y()
+        pdf.set_fill_color(241, 245, 249)
+        pdf.set_draw_color(203, 213, 225)
+        pdf.set_line_width(0.3)
+        pdf.rect(x, y, card_w - 1, card_h, "FD")
+        pdf.set_xy(x, y + 1)
+        pdf.set_font("Helvetica", "", 6.5)
+        pdf.set_text_color(100, 116, 139)
+        pdf.cell(card_w - 1, 4, label, align="C")
+        pdf.set_xy(x, y + 5.5)
+        pdf.set_font("Helvetica", "B", 9)
+        pdf.set_text_color(15, 23, 42)
+        pdf.cell(card_w - 1, 6, value, align="C")
+    pdf.ln(card_h + 4)
+    pdf.set_text_color(0, 0, 0)
+
+    # ── 2. Rankings table ────────────────────────────────────────────────────
+    pdf.section_title("Creative Rankings")
+
+    tbl_cols = [
+        ("Rank",       9,  "C"),
+        ("Creative ID", 30, "L"),
+        ("Platform",   25, "L"),
+        ("Spend ($)",  22, "R"),
+        ("Paid Starts", 22, "R"),
+        ("CPA ($)",    22, "R"),
+        ("CTR (%)",    18, "R"),
+        ("Decision",   32, "C"),
+    ]
+    col_keys = ["_rank", "creative_id", "platform", "spend", "paid_starts", "cpa", "ctr", "decision_label"]
+
+    header_h = 7
+    row_h = 6
+
+    pdf.set_fill_color(30, 58, 138)
+    pdf.set_text_color(255, 255, 255)
+    pdf.set_font("Helvetica", "B", 7.5)
+    for col_label, col_w, _ in tbl_cols:
+        pdf.cell(col_w, header_h, col_label, border=0, fill=True, align="C")
+    pdf.ln(header_h)
+
+    ranked = df.reset_index(drop=True).copy()
+    ranked.index = ranked.index + 1
+
+    for i, row in ranked.iterrows():
+        if pdf.get_y() > 260:
+            pdf.add_page()
+        decision = str(row.get("decision_label", "")) if "decision_label" in ranked.columns else ""
+        txt_rgb, fill_rgb = _PDF_DECISION_COLORS.get(decision, ((50, 50, 50), (248, 250, 252)))
+
+        fill_color = (248, 250, 252) if i % 2 == 0 else (255, 255, 255)
+        for idx, (_, col_w, align) in enumerate(tbl_cols):
+            key = col_keys[idx]
+            if key == "_rank":
+                val = str(i)
+            elif key == "decision_label":
+                val = decision
+            elif key not in ranked.columns:
+                val = "-"
+            else:
+                raw = row[key]
+                if pd.isna(raw):
+                    val = "-"
+                elif key in ("spend", "cpa"):
+                    val = f"${raw:,.0f}"
+                elif key in ("paid_starts",):
+                    val = f"{int(raw):,}"
+                elif key in ("ctr",):
+                    val = f"{raw:.1f}%"
+                else:
+                    val = str(raw)
+
+            if key == "decision_label" and decision:
+                pdf.set_fill_color(*fill_rgb)
+                pdf.set_text_color(*txt_rgb)
+            else:
+                pdf.set_fill_color(*fill_color)
+                pdf.set_text_color(30, 41, 59)
+
+            pdf.set_font("Helvetica", "B" if key == "decision_label" else "", 7)
+            safe_val = _pdf_safe(val)[:22]
+            pdf.cell(col_w, row_h, safe_val, border=0, fill=True, align=align)
+        pdf.ln(row_h)
+
+    pdf.set_text_color(0, 0, 0)
+    pdf.ln(4)
+
+    # ── 3. Chart image ───────────────────────────────────────────────────────
+    png_result = build_charts_png(df)
+    if isinstance(png_result, bytes) and png_result:
+        pdf.section_title("Chart Summary")
+        img_buf = BytesIO(png_result)
+        img_w = 180
+        img_h = round(img_w * 900 / 1400)
+        if pdf.get_y() + img_h > 270:
+            pdf.add_page()
+        pdf.image(img_buf, x=15, y=pdf.get_y(), w=img_w)
+        pdf.ln(img_h + 4)
+
+    # ── 4. Pattern analysis ──────────────────────────────────────────────────
+    patterns = get_patterns_text(df)
+    if patterns:
+        if pdf.get_y() > 240:
+            pdf.add_page()
+        pdf.section_title("Pattern Analysis")
+        for item in patterns:
+            if pdf.get_y() > 270:
+                pdf.add_page()
+            pdf.set_font("Helvetica", "", 8.5)
+            pdf.set_text_color(30, 41, 59)
+            pdf.set_fill_color(239, 246, 255)
+            pdf.set_x(15)
+            pdf.set_draw_color(59, 130, 246)
+            pdf.set_line_width(0.8)
+            text = _pdf_safe(item)
+            pdf.multi_cell(0, 5.5, f"  {text}", border="L", fill=True)
+            pdf.ln(1.5)
+        pdf.set_draw_color(0, 0, 0)
+        pdf.set_line_width(0.2)
+        pdf.ln(2)
+
+    # ── 5. Recommendations ───────────────────────────────────────────────────
+    recs = get_recommendations_text(df)
+    if recs:
+        if pdf.get_y() > 240:
+            pdf.add_page()
+        pdf.section_title("Recommendations — What to Test Next")
+        for rec in recs:
+            if pdf.get_y() > 270:
+                pdf.add_page()
+            pdf.set_font("Helvetica", "", 8.5)
+            pdf.set_text_color(30, 41, 59)
+            pdf.set_fill_color(240, 253, 244)
+            pdf.set_x(15)
+            pdf.set_draw_color(34, 197, 94)
+            pdf.set_line_width(0.8)
+            text = _pdf_safe(rec)
+            pdf.multi_cell(0, 5.5, f"  >>  {text}", border="L", fill=True)
+            pdf.ln(1.5)
+
+    return bytes(pdf.output())
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -1242,7 +1577,24 @@ def page_analyzer(
 
         st.divider()
 
-        st.markdown("<div class='section-header'>What should we test next?</div>", unsafe_allow_html=True)
+        rec_hdr_col, pdf_btn_col = st.columns([5, 1])
+        with rec_hdr_col:
+            st.markdown("<div class='section-header'>What should we test next?</div>", unsafe_allow_html=True)
+        with pdf_btn_col:
+            try:
+                pdf_bytes = build_pdf_report(df_ranked, goal, cpa_target)
+                today_str = datetime.date.today().strftime("%Y-%m-%d")
+                safe_goal = goal.lower().replace(" ", "_")
+                st.download_button(
+                    label="⬇ Download PDF Report",
+                    data=pdf_bytes,
+                    file_name=f"creative_report_{safe_goal}_{today_str}.pdf",
+                    mime="application/pdf",
+                    use_container_width=True,
+                    key="dl_pdf",
+                )
+            except Exception as _pdf_err:
+                st.warning(f"PDF export unavailable: {_pdf_err}")
         render_recommendations(df_ranked)
 
     else:
