@@ -798,7 +798,7 @@ _EXPORT_COL_LABELS = {
 }
 
 
-def build_export_csv(df: pd.DataFrame, goal: str) -> bytes:
+def build_export_csv(df: pd.DataFrame) -> bytes:
     """Return a UTF-8 CSV byte string of the ranked dataframe, formatted for readability."""
     present = [c for c in _EXPORT_COL_LABELS if c in df.columns]
     out = df[present].copy().reset_index(drop=True)
@@ -936,8 +936,8 @@ def build_charts_png(df: pd.DataFrame) -> bytes | None:
 
     try:
         return fig.to_image(format="png", scale=1.5)
-    except Exception:
-        return None
+    except Exception as e:
+        return e
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -1178,9 +1178,9 @@ def page_analyzer():
         with rank_hdr_col:
             st.markdown(f"<div class='section-header'>Creative Rankings — {goal}</div>", unsafe_allow_html=True)
         with csv_btn_col:
-            csv_bytes = build_export_csv(df_ranked, goal)
+            csv_bytes = build_export_csv(df_ranked)
             st.download_button(
-                label="⬇ Download CSV",
+                label="⬇ Download Rankings as CSV",
                 data=csv_bytes,
                 file_name=f"creative_rankings_{goal.lower().replace(' ', '_')}.csv",
                 mime="text/csv",
@@ -1195,11 +1195,13 @@ def page_analyzer():
         with chart_hdr_col:
             st.markdown("<div class='section-header'>Visuals</div>", unsafe_allow_html=True)
         with png_btn_col:
-            png_bytes = build_charts_png(df_ranked)
-            if png_bytes:
+            png_result = build_charts_png(df_ranked)
+            if isinstance(png_result, Exception):
+                st.warning(f"Chart export unavailable: {png_result}")
+            elif png_result:
                 st.download_button(
-                    label="⬇ Download Charts",
-                    data=png_bytes,
+                    label="⬇ Download Chart Summary as PNG",
+                    data=png_result,
                     file_name="creative_charts_summary.png",
                     mime="image/png",
                     use_container_width=True,
