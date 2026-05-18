@@ -8,7 +8,7 @@ st.set_page_config(
     page_title="Creative Performance Analyzer",
     page_icon="📊",
     layout="wide",
-    initial_sidebar_state="collapsed",
+    initial_sidebar_state="expanded",
 )
 
 # ── Custom CSS for dark dashboard polish ────────────────────────────────────
@@ -772,162 +772,669 @@ def render_recommendations(df: pd.DataFrame):
 
 
 # ══════════════════════════════════════════════════════════════════════════════
+# INTEGRATION PLACEHOLDER FUNCTIONS
+# ══════════════════════════════════════════════════════════════════════════════
+
+def test_meta_ads_connection(access_token: str, ad_account_id: str) -> tuple[str, str]:
+    """Prototype only. A real implementation would call the Meta Marketing API."""
+    # TODO: Replace with requests.get("https://graph.facebook.com/v19.0/me", ...)
+    if access_token and ad_account_id:
+        return "Connected", "Prototype only — no live API call made."
+    return "Failed", "Access token and Ad Account ID are required."
+
+
+def test_tiktok_ads_connection(access_token: str, advertiser_id: str) -> tuple[str, str]:
+    """Prototype only. A real implementation would call the TikTok Marketing API."""
+    # TODO: Replace with requests.get("https://business-api.tiktok.com/open_api/v1.3/...")
+    if access_token and advertiser_id:
+        return "Connected", "Prototype only — no live API call made."
+    return "Failed", "Access token and Advertiser ID are required."
+
+
+def test_airtable_connection(api_key: str, base_id: str) -> tuple[str, str]:
+    """Prototype only. A real implementation would call api.airtable.com."""
+    # TODO: Replace with requests.get(f"https://api.airtable.com/v0/{base_id}/...", headers=...)
+    if api_key and base_id:
+        return "Connected", "Prototype only — no live API call made."
+    return "Failed", "API key and Base ID are required."
+
+
+def test_notion_connection(api_key: str) -> tuple[str, str]:
+    """Prototype only. A real implementation would call api.notion.com."""
+    # TODO: Replace with requests.get("https://api.notion.com/v1/users/me", headers=...)
+    if api_key:
+        return "Connected", "Prototype only — no live API call made."
+    return "Failed", "API key is required."
+
+
+def test_slack_connection(bot_token: str) -> tuple[str, str]:
+    """Prototype only. A real implementation would call slack.com/api/auth.test."""
+    # TODO: Replace with requests.post("https://slack.com/api/auth.test", headers=...)
+    if bot_token:
+        return "Connected", "Prototype only — no live API call made."
+    return "Failed", "Bot token is required."
+
+
+def test_google_drive_connection(api_key: str) -> tuple[str, str]:
+    """Prototype only. A real implementation would use the Google Drive API."""
+    # TODO: Replace with requests.get("https://www.googleapis.com/drive/v3/about", ...)
+    if api_key:
+        return "Connected", "Prototype only — no live API call made."
+    return "Failed", "API key is required."
+
+
+def test_mixpanel_connection(api_secret: str) -> tuple[str, str]:
+    """Prototype only. A real implementation would call data.mixpanel.com."""
+    # TODO: Replace with requests.get("https://data.mixpanel.com/api/2.0/jql", auth=...)
+    if api_secret:
+        return "Connected", "Prototype only — no live API call made."
+    return "Failed", "API secret is required."
+
+
+def test_amplitude_connection(api_key: str) -> tuple[str, str]:
+    """Prototype only. A real implementation would call amplitude.com/api/2/."""
+    # TODO: Replace with requests.get("https://amplitude.com/api/2/taxonomy/event", auth=...)
+    if api_key:
+        return "Connected", "Prototype only — no live API call made."
+    return "Failed", "API key is required."
+
+
+def test_hubspot_connection(private_app_token: str) -> tuple[str, str]:
+    """Prototype only. A real implementation would call api.hubapi.com."""
+    # TODO: Replace with requests.get("https://api.hubapi.com/crm/v3/objects/contacts", headers=...)
+    if private_app_token:
+        return "Connected", "Prototype only — no live API call made."
+    return "Failed", "Private app token is required."
+
+
+def try_load_google_sheet(url: str) -> tuple[pd.DataFrame | None, str]:
+    """Attempt to load a public Google Sheets CSV export URL into a DataFrame."""
+    try:
+        df = pd.read_csv(url)
+        return df, "ok"
+    except Exception as e:
+        return None, str(e)
+
+
+def _status_badge(status: str) -> str:
+    colors = {
+        "Connected": ("#34d399", "#1a4731"),
+        "Failed": ("#f87171", "#3b0a0a"),
+        "Not connected": ("#8A9BC8", "#1a2035"),
+        "Prototype only": ("#fbbf24", "#3b3515"),
+    }
+    fg, bg = colors.get(status, ("#8A9BC8", "#1a2035"))
+    return (
+        f"<span style='background:{bg};color:{fg};border:1px solid {fg};"
+        f"padding:2px 10px;border-radius:20px;font-size:0.78rem;font-weight:700;'>{status}</span>"
+    )
+
+
+def render_integration_card(
+    title: str,
+    description: str,
+    fields: list[dict],
+    possible_pulls: list[str],
+    test_fn,
+    state_key: str,
+):
+    """Render a single integration card with inputs, test button, and data pull list."""
+    with st.container():
+        st.markdown(
+            f"<div style='background:#161B27;border:1px solid #2A3350;border-radius:10px;"
+            f"padding:20px 24px;margin-bottom:16px;'>",
+            unsafe_allow_html=True,
+        )
+        header_col, badge_col = st.columns([4, 1])
+        with header_col:
+            st.markdown(f"**{title}**")
+            st.caption(description)
+        with badge_col:
+            status = st.session_state.get(f"status_{state_key}", "Not connected")
+            st.markdown(_status_badge(status), unsafe_allow_html=True)
+
+        collected = {}
+        for field in fields:
+            key = f"{state_key}_{field['key']}"
+            if field.get("password"):
+                collected[field["key"]] = st.text_input(
+                    field["label"], key=key, type="password",
+                    placeholder=field.get("placeholder", ""),
+                )
+            else:
+                collected[field["key"]] = st.text_input(
+                    field["label"], key=key,
+                    placeholder=field.get("placeholder", ""),
+                )
+
+        if st.button(f"Test connection — {title}", key=f"btn_{state_key}"):
+            result_status, result_msg = test_fn(**collected)
+            st.session_state[f"status_{state_key}"] = result_status
+            if result_status == "Connected":
+                st.success(result_msg)
+            else:
+                st.error(result_msg)
+
+        with st.expander("Possible data pulls"):
+            for item in possible_pulls:
+                st.markdown(f"- {item}")
+
+        st.markdown("</div>", unsafe_allow_html=True)
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# PAGE RENDERERS
+# ══════════════════════════════════════════════════════════════════════════════
+
+def page_analyzer():
+    st.markdown(
+        """
+        <div style="display:flex;align-items:center;gap:12px;margin-bottom:0.2rem;">
+          <span style="font-size:2rem;">📊</span>
+          <span style="font-size:1.7rem;font-weight:800;letter-spacing:-0.02em;">Creative Performance Analyzer</span>
+        </div>
+        <p style="color:#8A9BC8;margin-top:0;margin-bottom:1rem;font-size:0.95rem;">
+          Upload your ad creative data · Choose a campaign goal · Review rankings · Read recommendations
+        </p>
+        """,
+        unsafe_allow_html=True,
+    )
+    st.divider()
+
+    upload_col, sample_col = st.columns([3, 1])
+    with upload_col:
+        uploaded_file = st.file_uploader(
+            "Upload CSV or Excel file",
+            type=["csv", "xlsx", "xls"],
+            help="Columns like Creative ID, Platform, Spend, Thumbstop Rate, CTR, Trial Starts, Paid Starts",
+        )
+    with sample_col:
+        st.write("")
+        st.write("")
+        if st.button("📂  Use sample LoopNote data", use_container_width=True):
+            df_raw, warns = load_and_clean(SAMPLE_CSV)
+            st.session_state.df_raw = df_raw
+            st.session_state.warnings = warns
+
+    # Also accept data loaded from Google Sheets on Integrations page
+    if uploaded_file is not None:
+        try:
+            df_raw, warns = load_and_clean(uploaded_file)
+            st.session_state.df_raw = df_raw
+            st.session_state.warnings = warns
+        except Exception as e:
+            st.error(f"Could not read file: {e}")
+    elif st.session_state.get("sheets_df") is not None and st.session_state.df_raw is None:
+        st.info("Using data loaded from Google Sheets (Integrations page).")
+        st.session_state.df_raw = st.session_state.sheets_df
+
+    if st.session_state.df_raw is not None:
+        df_raw = st.session_state.df_raw
+
+        for w in st.session_state.get("warnings", []):
+            st.warning(w)
+
+        df, kpi_warnings = calculate_kpis(df_raw)
+        df = assign_decision_labels(df)
+
+        goal_options = [
+            "Paid Starts", "Trial Starts", "Efficient Paid Starts",
+            "Efficient Trial Starts", "Creative Engagement", "Full Funnel Quality",
+        ]
+        goal_col, spacer = st.columns([2, 5])
+        with goal_col:
+            goal = st.selectbox("Campaign Goal", goal_options, index=0)
+
+        df_ranked = rank_by_goal(df, goal)
+        df_ranked = assign_decision_labels(df_ranked)
+
+        st.divider()
+
+        st.markdown("<div class='section-header'>Performance Summary</div>", unsafe_allow_html=True)
+        render_summary_cards(df_ranked, goal)
+
+        if kpi_warnings:
+            with st.expander("⚠️  Some KPIs could not be calculated — expand for details"):
+                for w in kpi_warnings:
+                    st.caption(f"• {w}")
+
+        st.divider()
+
+        if goal == "Efficient Paid Starts" and "scale_candidate" in df_ranked.columns:
+            candidates = df_ranked[df_ranked["scale_candidate"] == True]["creative_id"].tolist()
+            if candidates:
+                st.success(f"🚀  **Scale Candidates** (CPA < ${CPA_TARGET}): {', '.join(str(c) for c in candidates)}")
+
+        st.markdown(f"<div class='section-header'>Creative Rankings — {goal}</div>", unsafe_allow_html=True)
+        render_ranking_table(df_ranked)
+
+        st.divider()
+
+        st.markdown("<div class='section-header'>Visuals</div>", unsafe_allow_html=True)
+        render_charts(df_ranked)
+
+        st.divider()
+
+        st.markdown("<div class='section-header'>What patterns are emerging?</div>", unsafe_allow_html=True)
+        render_patterns(df_ranked)
+
+        st.divider()
+
+        st.markdown("<div class='section-header'>What should we test next?</div>", unsafe_allow_html=True)
+        render_recommendations(df_ranked)
+
+    else:
+        st.markdown(
+            """
+            <div style="background:#161B27;border:1px solid #2A3350;border-radius:12px;
+                        padding:32px 40px;max-width:700px;margin:24px auto 0;">
+              <h3 style="margin-top:0;color:#FAFAFA;">How it works</h3>
+              <div style="display:grid;grid-template-columns:40px 1fr;gap:8px 12px;align-items:start;font-size:0.95rem;color:#C5CFDF;">
+                <span style="color:#4F8EF7;font-weight:700;font-size:1.1rem;">1</span>
+                <span><b>Upload data</b> — CSV or Excel with your ad creative metrics, or connect Google Sheets via the Integrations page, or use the built-in LoopNote sample.</span>
+                <span style="color:#4F8EF7;font-weight:700;font-size:1.1rem;">2</span>
+                <span><b>Choose a campaign goal</b> — Paid Starts, Trial Starts, Efficient CPA, Creative Engagement, or Full Funnel Quality.</span>
+                <span style="color:#4F8EF7;font-weight:700;font-size:1.1rem;">3</span>
+                <span><b>Review rankings</b> — Creatives are scored and labelled: Scale, Keep Testing, Fix Funnel, Cut, or Review.</span>
+                <span style="color:#4F8EF7;font-weight:700;font-size:1.1rem;">4</span>
+                <span><b>Read recommendations</b> — Rule-based insights tell you exactly what to test next.</span>
+                <span style="color:#4F8EF7;font-weight:700;font-size:1.1rem;">5</span>
+                <span><b>Explore integrations</b> — See how this tool connects to Meta Ads, TikTok, Google Sheets, Airtable, Slack, and more via the Integrations page.</span>
+                <span style="color:#4F8EF7;font-weight:700;font-size:1.1rem;">6</span>
+                <span><b>Understand the methodology</b> — Full KPI formulas, ranking logic, and decision-label criteria are documented on the Methodology page.</span>
+              </div>
+              <p style="margin-bottom:0;margin-top:20px;color:#8A9BC8;font-size:0.88rem;">
+                Supported columns: Creative ID · Platform · Format/Concept · Length · Spend · Thumbstop Rate ·
+                6s Hold Rate · CTR · Trial Starts · Paid Starts
+              </p>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+
+
+def page_integrations():
+    st.markdown(
+        """
+        <div style="display:flex;align-items:center;gap:12px;margin-bottom:0.2rem;">
+          <span style="font-size:2rem;">🔌</span>
+          <span style="font-size:1.7rem;font-weight:800;letter-spacing:-0.02em;">Integrations</span>
+        </div>
+        <p style="color:#8A9BC8;margin-top:0;margin-bottom:0.5rem;font-size:0.95rem;">
+          Connect your data sources to turn the analyzer into a lightweight creative intelligence hub.
+        </p>
+        """,
+        unsafe_allow_html=True,
+    )
+
+    st.warning(
+        "**Security notice:** This is a prototype integration layer. API keys entered here are stored only in your "
+        "browser session and are never saved or logged. Production versions should use OAuth, encrypted secret storage, "
+        "environment variables, and role-based permissions."
+    )
+
+    st.divider()
+
+    # ── Why these integrations matter ────────────────────────────────────────
+    st.markdown("<div class='section-header'>Why these integrations matter</div>", unsafe_allow_html=True)
+    st.markdown(
+        "<div class='insight-box'>"
+        "Manual CSV upload is useful for quick analysis, but growth teams usually make creative decisions from scattered data. "
+        "Ad platforms show performance, Sheets and Airtable track test plans, Drive stores assets, Slack and Notion capture "
+        "team learnings, and product analytics tools show whether paid users actually activate. This integration layer shows "
+        "how the analyzer could become a lightweight creative intelligence hub instead of a one-off spreadsheet review."
+        "</div>",
+        unsafe_allow_html=True,
+    )
+
+    st.divider()
+
+    # ── Google Sheets (real data pull) ───────────────────────────────────────
+    st.markdown("<div class='section-header'>Google Sheets — Live data pull</div>", unsafe_allow_html=True)
+    st.caption("Paste a public Google Sheets CSV export URL to load data directly into the Analyzer.")
+
+    sheets_url = st.text_input(
+        "Google Sheets CSV export URL",
+        key="gs_url",
+        placeholder="https://docs.google.com/spreadsheets/d/.../export?format=csv",
+    )
+
+    gs_status = st.session_state.get("status_google_sheets", "Not connected")
+    st.markdown(_status_badge(gs_status), unsafe_allow_html=True)
+
+    if st.button("Load from Google Sheets", key="btn_google_sheets"):
+        if sheets_url:
+            with st.spinner("Loading…"):
+                df_gs, err = try_load_google_sheet(sheets_url)
+            if df_gs is not None:
+                st.session_state.sheets_df = df_gs
+                st.session_state.df_raw = None  # let Analyzer page pick it up fresh
+                st.session_state.status_google_sheets = "Connected"
+                st.success(f"Loaded {len(df_gs):,} rows × {len(df_gs.columns)} columns. Switch to the Analyzer page to use this data.")
+                st.dataframe(df_gs.head(5), use_container_width=True)
+            else:
+                st.session_state.status_google_sheets = "Failed"
+                st.error(f"Could not load sheet: {err}")
+        else:
+            st.warning("Enter a Google Sheets CSV export URL first.")
+
+    with st.expander("Possible data pulls — Google Sheets"):
+        for item in ["Creative performance table", "Campaign export table", "Testing tracker", "Weekly reporting sheet"]:
+            st.markdown(f"- {item}")
+
+    st.divider()
+
+    # ── Meta Ads ─────────────────────────────────────────────────────────────
+    st.markdown("<div class='section-header'>Meta Ads</div>", unsafe_allow_html=True)
+    render_integration_card(
+        title="Meta Ads",
+        description="Direct source for spend, impressions, clicks, CTR, conversions, creative IDs, platform-level performance, and cost per result.",
+        fields=[
+            {"key": "access_token", "label": "Access Token", "password": True, "placeholder": "EAAxxxx…"},
+            {"key": "ad_account_id", "label": "Ad Account ID", "placeholder": "act_123456789"},
+        ],
+        possible_pulls=["Creative-level spend", "CTR", "Impressions", "Clicks", "Conversions", "Cost per result", "Creative IDs", "Campaign and ad set metadata"],
+        test_fn=test_meta_ads_connection,
+        state_key="meta_ads",
+    )
+
+    # ── TikTok Ads ────────────────────────────────────────────────────────────
+    st.markdown("<div class='section-header'>TikTok Ads</div>", unsafe_allow_html=True)
+    render_integration_card(
+        title="TikTok Ads",
+        description="Direct source for short-form creative performance, thumbstop behavior, hold rates, CTR, spend, and conversion data.",
+        fields=[
+            {"key": "access_token", "label": "Access Token", "password": True, "placeholder": "Bearer xxxx…"},
+            {"key": "advertiser_id", "label": "Advertiser ID", "placeholder": "1234567890123"},
+        ],
+        possible_pulls=["Thumbstop rate", "Hold rate", "CTR", "Spend", "Trial starts", "Paid starts", "Video-level engagement"],
+        test_fn=test_tiktok_ads_connection,
+        state_key="tiktok_ads",
+    )
+
+    # ── Airtable ──────────────────────────────────────────────────────────────
+    st.markdown("<div class='section-header'>Airtable</div>", unsafe_allow_html=True)
+    render_integration_card(
+        title="Airtable",
+        description="Useful for creative testing databases, hook libraries, concept tags, production status, test history, and learning logs.",
+        fields=[
+            {"key": "api_key", "label": "API Key", "password": True, "placeholder": "patXXXX…"},
+            {"key": "base_id", "label": "Base ID", "placeholder": "appXXXXXXXX"},
+        ],
+        possible_pulls=["Creative concept database", "Hook library", "Test status", "Creative owner", "Production stage", "Learning tags"],
+        test_fn=test_airtable_connection,
+        state_key="airtable",
+    )
+
+    # ── Notion ────────────────────────────────────────────────────────────────
+    st.markdown("<div class='section-header'>Notion</div>", unsafe_allow_html=True)
+    render_integration_card(
+        title="Notion",
+        description="Useful for creative briefs, experiment documentation, weekly learnings, and team-facing summaries.",
+        fields=[
+            {"key": "api_key", "label": "Integration Token", "password": True, "placeholder": "secret_xxxx…"},
+        ],
+        possible_pulls=["Creative briefs", "Weekly growth notes", "Test summaries", "Experiment writeups"],
+        test_fn=test_notion_connection,
+        state_key="notion",
+    )
+
+    # ── Slack ─────────────────────────────────────────────────────────────────
+    st.markdown("<div class='section-header'>Slack</div>", unsafe_allow_html=True)
+    render_integration_card(
+        title="Slack",
+        description="Useful for sending scale, cut, and test-next recommendations directly to the growth team.",
+        fields=[
+            {"key": "bot_token", "label": "Bot Token", "password": True, "placeholder": "xoxb-xxxx…"},
+        ],
+        possible_pulls=["Scale and cut alerts", "Weekly creative summaries", "Test recommendations", "Team notifications"],
+        test_fn=test_slack_connection,
+        state_key="slack",
+    )
+
+    # ── Google Drive ──────────────────────────────────────────────────────────
+    st.markdown("<div class='section-header'>Google Drive</div>", unsafe_allow_html=True)
+    render_integration_card(
+        title="Google Drive",
+        description="Useful for linking creative assets, raw videos, thumbnails, briefs, and campaign exports.",
+        fields=[
+            {"key": "api_key", "label": "API Key", "password": True, "placeholder": "AIzaXXXX…"},
+        ],
+        possible_pulls=["Creative files", "Video assets", "Thumbnails", "Briefs", "Exported reports"],
+        test_fn=test_google_drive_connection,
+        state_key="google_drive",
+    )
+
+    # ── Mixpanel ──────────────────────────────────────────────────────────────
+    st.markdown("<div class='section-header'>Mixpanel</div>", unsafe_allow_html=True)
+    render_integration_card(
+        title="Mixpanel",
+        description="Useful for product-side activation data, trial behavior, user cohorts, and trial-to-paid funnel analysis.",
+        fields=[
+            {"key": "api_secret", "label": "API Secret", "password": True, "placeholder": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"},
+        ],
+        possible_pulls=["Activation events", "Trial usage behavior", "Product engagement by cohort", "Trial-to-paid funnel events"],
+        test_fn=test_mixpanel_connection,
+        state_key="mixpanel",
+    )
+
+    # ── Amplitude ─────────────────────────────────────────────────────────────
+    st.markdown("<div class='section-header'>Amplitude</div>", unsafe_allow_html=True)
+    render_integration_card(
+        title="Amplitude",
+        description="Useful for product analytics, retention behavior, activation events, and user journey analysis.",
+        fields=[
+            {"key": "api_key", "label": "API Key", "password": True, "placeholder": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"},
+        ],
+        possible_pulls=["User journey analysis", "Retention metrics", "Activation cohorts", "Funnel drop-off data"],
+        test_fn=test_amplitude_connection,
+        state_key="amplitude",
+    )
+
+    # ── HubSpot ───────────────────────────────────────────────────────────────
+    st.markdown("<div class='section-header'>HubSpot</div>", unsafe_allow_html=True)
+    render_integration_card(
+        title="HubSpot",
+        description="Useful for lead quality, lifecycle stage, CRM source attribution, and downstream conversion feedback.",
+        fields=[
+            {"key": "private_app_token", "label": "Private App Token", "password": True, "placeholder": "pat-na1-xxxx…"},
+        ],
+        possible_pulls=["Lead source quality", "Lifecycle stage", "CRM conversion feedback", "Deal source attribution"],
+        test_fn=test_hubspot_connection,
+        state_key="hubspot",
+    )
+
+    st.divider()
+
+    # ── Production improvements ───────────────────────────────────────────────
+    st.markdown("<div class='section-header'>Production improvements</div>", unsafe_allow_html=True)
+    improvements = [
+        "OAuth instead of manual API keys",
+        "Encrypted secret storage",
+        "Environment variables for server-side secrets",
+        "Role-based permissions",
+        "Scheduled data refresh",
+        "Source-specific data mapping",
+        "API rate limit handling",
+        "Error logging",
+        "Secret scanning before deployment",
+        "Clear separation between frontend inputs and backend data pulls",
+    ]
+    cols = st.columns(2)
+    for i, item in enumerate(improvements):
+        with cols[i % 2]:
+            st.markdown(f"<div class='insight-box'>✦ {item}</div>", unsafe_allow_html=True)
+
+
+def page_methodology():
+    st.markdown(
+        """
+        <div style="display:flex;align-items:center;gap:12px;margin-bottom:0.2rem;">
+          <span style="font-size:2rem;">📐</span>
+          <span style="font-size:1.7rem;font-weight:800;letter-spacing:-0.02em;">Methodology</span>
+        </div>
+        <p style="color:#8A9BC8;margin-top:0;margin-bottom:1rem;font-size:0.95rem;">
+          How KPIs are calculated, how creatives are ranked, and why each decision label means what it means.
+        </p>
+        """,
+        unsafe_allow_html=True,
+    )
+    st.divider()
+
+    # ── KPI formulas ─────────────────────────────────────────────────────────
+    st.markdown("<div class='section-header'>KPI Formulas</div>", unsafe_allow_html=True)
+    kpis = [
+        ("Cost per Paid Start", "Spend ÷ Paid Starts", "Primary efficiency metric. Lower = better."),
+        ("Cost per Trial Start", "Spend ÷ Trial Starts", "Upper-funnel efficiency. Useful for trial-led products."),
+        ("Trial → Paid CVR", "Paid Starts ÷ Trial Starts", "Conversion quality from trial to paying customer."),
+        ("Paid Starts per $1k", "Paid Starts ÷ Spend × 1,000", "Volume efficiency — how many paid starts per thousand dollars spent."),
+        ("Trial Starts per $1k", "Trial Starts ÷ Spend × 1,000", "Upper-funnel volume efficiency."),
+        ("CTR Efficiency Score", "CTR ÷ Cost per Paid Start", "How much click-through rate you get per dollar of CPA."),
+        ("Thumbstop Efficiency", "Thumbstop Rate ÷ Cost per Paid Start", "How much scroll-stopping power you get per dollar of CPA."),
+        ("Hold Efficiency", "6s Hold Rate ÷ Cost per Paid Start", "How much 6-second retention you get per dollar of CPA."),
+    ]
+    for name, formula, note in kpis:
+        st.markdown(
+            f"<div style='background:#161B27;border:1px solid #2A3350;border-radius:8px;"
+            f"padding:12px 18px;margin-bottom:8px;'>"
+            f"<span style='color:#4F8EF7;font-weight:700;'>{name}</span>"
+            f"<span style='color:#8A9BC8;font-size:0.82rem;margin-left:12px;'>{formula}</span>"
+            f"<div style='color:#C5CFDF;font-size:0.88rem;margin-top:4px;'>{note}</div>"
+            f"</div>",
+            unsafe_allow_html=True,
+        )
+
+    st.divider()
+
+    # ── Ranking logic ─────────────────────────────────────────────────────────
+    st.markdown("<div class='section-header'>Ranking Logic by Campaign Goal</div>", unsafe_allow_html=True)
+    goals_info = [
+        ("Paid Starts", "Sort by Paid Starts descending. Best for pure volume goals."),
+        ("Trial Starts", "Sort by Trial Starts descending. Best for upper-funnel volume."),
+        ("Efficient Paid Starts", f"Primary: Cost per Paid Start ascending. Secondary: Paid Starts descending. Creatives below the ${CPA_TARGET} CPA target are flagged as Scale Candidates."),
+        ("Efficient Trial Starts", "Primary: Cost per Trial Start ascending. Secondary: Trial Starts descending."),
+        ("Creative Engagement", "Weighted score: 40% Thumbstop Rate + 30% 6s Hold Rate + 30% CTR. Each metric is min-max normalised before scoring. Best for hook and mid-funnel creative testing."),
+        ("Full Funnel Quality", "Weighted normalised score: 30% Cost per Paid Start (lower is better) + 25% Paid Starts + 20% Trial→Paid CVR + 15% CTR + 10% Thumbstop Rate. Best for holistic creative reviews."),
+    ]
+    for goal_name, logic in goals_info:
+        st.markdown(
+            f"<div style='background:#161B27;border:1px solid #2A3350;border-radius:8px;"
+            f"padding:12px 18px;margin-bottom:8px;'>"
+            f"<span style='color:#4F8EF7;font-weight:700;'>{goal_name}</span>"
+            f"<div style='color:#C5CFDF;font-size:0.88rem;margin-top:4px;'>{logic}</div>"
+            f"</div>",
+            unsafe_allow_html=True,
+        )
+
+    st.divider()
+
+    # ── Decision labels ───────────────────────────────────────────────────────
+    st.markdown("<div class='section-header'>Decision Labels</div>", unsafe_allow_html=True)
+    label_info = [
+        ("Scale", "#34d399", "#1a4731", f"CPA is below ${CPA_TARGET} target AND Paid Starts are above median. This creative is working — invest more."),
+        ("Keep Testing", "#fbbf24", "#3b3515", "Engagement metrics are above median but Paid Starts are below median. The hook is working; the funnel needs attention."),
+        ("Fix Funnel", "#fb923c", "#3b2200", "Trial Starts are above median but Trial→Paid CVR is below median. Traffic is coming through; conversion is the problem."),
+        ("Cut", "#f87171", "#3b0a0a", f"CPA is above ${CPA_TARGET} AND engagement is below median. No signal worth investing in. Retire and reallocate."),
+        ("Review", "#f59e0b", "#2e2a10", "Does not clearly meet any of the above criteria. Needs manual review before a decision."),
+    ]
+    for label, fg, bg, explanation in label_info:
+        st.markdown(
+            f"<div style='background:{bg};border:1px solid {fg};border-radius:8px;"
+            f"padding:12px 18px;margin-bottom:8px;'>"
+            f"<span style='color:{fg};font-weight:700;font-size:1rem;'>{label}</span>"
+            f"<div style='color:#C5CFDF;font-size:0.88rem;margin-top:4px;'>{explanation}</div>"
+            f"</div>",
+            unsafe_allow_html=True,
+        )
+
+    st.divider()
+
+    # ── Why CPA matters for LoopNote ──────────────────────────────────────────
+    st.markdown("<div class='section-header'>Why Cost per Paid Start matters most for LoopNote</div>", unsafe_allow_html=True)
+    st.markdown(
+        "<div class='insight-box'>"
+        "LoopNote is a subscription product with a trial-to-paid model. The most important signal is whether an ad creative "
+        "drives paying customers — not just clicks, impressions, or even trial sign-ups. A creative with a low thumbstop rate "
+        "but a sub-$90 CPA is more valuable than a viral hook that never converts. Cost per Paid Start cuts through surface-level "
+        "engagement and connects creative investment directly to revenue."
+        "</div>",
+        unsafe_allow_html=True,
+    )
+    st.markdown(
+        "<div class='insight-box'>"
+        "That said, CPA alone can mislead on small spend samples. Creatives with fewer than 5–10 paid starts should be treated "
+        "as directional signals, not conclusive results. Always read CPA alongside Paid Starts volume."
+        "</div>",
+        unsafe_allow_html=True,
+    )
+
+    st.divider()
+
+    # ── Adapting to other goals ───────────────────────────────────────────────
+    st.markdown("<div class='section-header'>How the tool adapts to other campaign goals</div>", unsafe_allow_html=True)
+    st.markdown(
+        "<div class='insight-box'>"
+        "The goal selector re-weights the ranking logic without changing the underlying data. A team focused on trial volume "
+        "can rank by Trial Starts; a team testing creative hooks before scaling can use Creative Engagement scoring. "
+        "Full Funnel Quality is best for quarterly reviews where all five signals matter equally. Switching goals never alters "
+        "the raw KPIs — only the sort order and score changes."
+        "</div>",
+        unsafe_allow_html=True,
+    )
+
+    st.divider()
+
+    # ── Engagement vs conversion ──────────────────────────────────────────────
+    st.markdown("<div class='section-header'>Why engagement metrics should be read alongside conversion metrics</div>", unsafe_allow_html=True)
+    st.markdown(
+        "<div class='insight-box'>"
+        "Thumbstop Rate and 6s Hold Rate measure whether a creative earns attention in the first moments of a scroll. "
+        "CTR measures whether it earns a click. But attention and clicks do not guarantee paid subscriptions. A creative "
+        "can stop the scroll and still fail to convert if the offer is weak, the landing page creates friction, or the "
+        "product doesn't match the promise in the ad."
+        "</div>",
+        unsafe_allow_html=True,
+    )
+    st.markdown(
+        "<div class='insight-box'>"
+        "The most useful pattern to look for is a creative with high engagement but high CPA — this is a funnel problem, "
+        "not a creative problem. Conversely, a creative with low engagement but low CPA is doing something unusual: "
+        "it may be self-selecting a high-intent audience. Both patterns are worth investigating before making scale or cut decisions."
+        "</div>",
+        unsafe_allow_html=True,
+    )
+
+
+# ══════════════════════════════════════════════════════════════════════════════
 # APP LAYOUT
 # ══════════════════════════════════════════════════════════════════════════════
 
 # ── Initialise session state ─────────────────────────────────────────────────
 if "df_raw" not in st.session_state:
     st.session_state.df_raw = None
+if "sheets_df" not in st.session_state:
+    st.session_state.sheets_df = None
 
-# ── Header ───────────────────────────────────────────────────────────────────
-st.markdown(
-    """
-    <div style="display:flex;align-items:center;gap:12px;margin-bottom:0.2rem;">
-      <span style="font-size:2rem;">📊</span>
-      <span style="font-size:1.7rem;font-weight:800;letter-spacing:-0.02em;">Creative Performance Analyzer</span>
-    </div>
-    <p style="color:#8A9BC8;margin-top:0;margin-bottom:1rem;font-size:0.95rem;">
-      Upload your ad creative data · Choose a campaign goal · Review rankings · Read recommendations
-    </p>
-    """,
-    unsafe_allow_html=True,
-)
-
-st.divider()
-
-# ── Upload / sample data row ─────────────────────────────────────────────────
-upload_col, sample_col = st.columns([3, 1])
-
-with upload_col:
-    uploaded_file = st.file_uploader(
-        "Upload CSV or Excel file",
-        type=["csv", "xlsx", "xls"],
-        help="Columns like Creative ID, Platform, Spend, Thumbstop Rate, CTR, Trial Starts, Paid Starts",
-    )
-
-with sample_col:
-    st.write("")
-    st.write("")
-    if st.button("📂  Use sample LoopNote data", use_container_width=True):
-        df_raw, warns = load_and_clean(SAMPLE_CSV)
-        st.session_state.df_raw = df_raw
-        st.session_state.warnings = warns
-
-if uploaded_file is not None:
-    try:
-        df_raw, warns = load_and_clean(uploaded_file)
-        st.session_state.df_raw = df_raw
-        st.session_state.warnings = warns
-    except Exception as e:
-        st.error(f"Could not read file: {e}")
-
-# ── Analysis ─────────────────────────────────────────────────────────────────
-if st.session_state.df_raw is not None:
-    df_raw = st.session_state.df_raw
-
-    # Show any data-loading warnings
-    for w in st.session_state.get("warnings", []):
-        st.warning(w)
-
-    # Calculate KPIs
-    df, kpi_warnings = calculate_kpis(df_raw)
-
-    # Assign decision labels (needs KPIs)
-    df = assign_decision_labels(df)
-
-    # ── Goal selector ────────────────────────────────────────────────────────
-    goal_options = [
-        "Paid Starts",
-        "Trial Starts",
-        "Efficient Paid Starts",
-        "Efficient Trial Starts",
-        "Creative Engagement",
-        "Full Funnel Quality",
-    ]
-    goal_col, spacer = st.columns([2, 5])
-    with goal_col:
-        goal = st.selectbox("Campaign Goal", goal_options, index=0)
-
-    # Rank
-    df_ranked = rank_by_goal(df, goal)
-    df_ranked = assign_decision_labels(df_ranked)
-
-    st.divider()
-
-    # ── Summary cards ────────────────────────────────────────────────────────
-    st.markdown("<div class='section-header'>Performance Summary</div>", unsafe_allow_html=True)
-    render_summary_cards(df_ranked, goal)
-
-    if kpi_warnings:
-        with st.expander("⚠️  Some KPIs could not be calculated — expand for details"):
-            for w in kpi_warnings:
-                st.caption(f"• {w}")
-
-    st.divider()
-
-    # ── Scale candidates callout (Efficient Paid Starts) ─────────────────────
-    if goal == "Efficient Paid Starts" and "scale_candidate" in df_ranked.columns:
-        candidates = df_ranked[df_ranked["scale_candidate"] == True]["creative_id"].tolist()
-        if candidates:
-            st.success(f"🚀  **Scale Candidates** (CPA < ${CPA_TARGET}): {', '.join(str(c) for c in candidates)}")
-
-    # ── Ranking table ────────────────────────────────────────────────────────
-    st.markdown(f"<div class='section-header'>Creative Rankings — {goal}</div>", unsafe_allow_html=True)
-    render_ranking_table(df_ranked)
-
-    st.divider()
-
-    # ── Charts ───────────────────────────────────────────────────────────────
-    st.markdown("<div class='section-header'>Visuals</div>", unsafe_allow_html=True)
-    render_charts(df_ranked)
-
-    st.divider()
-
-    # ── Pattern analysis ─────────────────────────────────────────────────────
-    st.markdown("<div class='section-header'>What patterns are emerging?</div>", unsafe_allow_html=True)
-    render_patterns(df_ranked)
-
-    st.divider()
-
-    # ── Test recommendations ─────────────────────────────────────────────────
-    st.markdown("<div class='section-header'>What should we test next?</div>", unsafe_allow_html=True)
-    render_recommendations(df_ranked)
-
-else:
-    # ── Welcome state ─────────────────────────────────────────────────────────
+# ── Sidebar navigation ────────────────────────────────────────────────────────
+with st.sidebar:
     st.markdown(
-        """
-        <div style="background:#161B27;border:1px solid #2A3350;border-radius:12px;
-                    padding:32px 40px;max-width:700px;margin:24px auto 0;">
-          <h3 style="margin-top:0;color:#FAFAFA;">How it works</h3>
-          <div style="display:grid;grid-template-columns:40px 1fr;gap:8px 12px;align-items:start;font-size:0.95rem;color:#C5CFDF;">
-            <span style="color:#4F8EF7;font-weight:700;font-size:1.1rem;">1</span>
-            <span><b>Upload data</b> — CSV or Excel with your ad creative metrics, or use the built-in LoopNote sample.</span>
-            <span style="color:#4F8EF7;font-weight:700;font-size:1.1rem;">2</span>
-            <span><b>Choose a campaign goal</b> — Paid Starts, Trial Starts, Engagement, or Full Funnel Quality.</span>
-            <span style="color:#4F8EF7;font-weight:700;font-size:1.1rem;">3</span>
-            <span><b>Review rankings</b> — Creatives are scored and labelled: Scale, Keep Testing, Fix Funnel, Cut, or Review.</span>
-            <span style="color:#4F8EF7;font-weight:700;font-size:1.1rem;">4</span>
-            <span><b>Read recommendations</b> — Rule-based insights tell you exactly what to test next.</span>
-          </div>
-          <p style="margin-bottom:0;margin-top:20px;color:#8A9BC8;font-size:0.88rem;">
-            Supported columns: Creative ID · Platform · Format/Concept · Length · Spend · Thumbstop Rate ·
-            6s Hold Rate · CTR · Trial Starts · Paid Starts
-          </p>
-        </div>
-        """,
+        "<div style='font-size:1.1rem;font-weight:800;letter-spacing:-0.01em;margin-bottom:4px;'>📊 Creative Analyzer</div>",
         unsafe_allow_html=True,
     )
+    st.caption("Paid social creative intelligence")
+    st.divider()
+    page = st.radio(
+        "Navigation",
+        ["Analyzer", "Integrations", "Methodology"],
+        label_visibility="collapsed",
+    )
+    st.divider()
+    st.caption("Use the Integrations page to connect data sources, or load the built-in LoopNote sample on the Analyzer page.")
 
-# ── Footer ────────────────────────────────────────────────────────────────────
-st.divider()
-st.markdown("**AI / tools used**")
-st.text_area(
-    label="",
-    value=(
-        "AI was used to help structure the app logic, ranking methodology, and rule-based recommendation system. "
-        "The final tool is a lightweight prototype built for fast creative decision-making, not a production analytics platform."
-    ),
-    height=80,
-    label_visibility="collapsed",
-)
+# ── Route to page ─────────────────────────────────────────────────────────────
+if page == "Analyzer":
+    page_analyzer()
+elif page == "Integrations":
+    page_integrations()
+elif page == "Methodology":
+    page_methodology()
