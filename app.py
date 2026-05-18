@@ -8,6 +8,9 @@ import plotly.subplots as psub
 import plotly.graph_objects as go
 from io import StringIO, BytesIO
 from fpdf import FPDF
+import json
+import os
+import html as _html
 
 st.set_page_config(
     page_title="Creative Performance Analyzer",
@@ -136,6 +139,62 @@ CPA_TARGET = 90.0
 # Default scoring weights (as percentages that must sum to 100)
 CE_WEIGHTS_DEFAULT = {"thumbstop_rate": 40, "hold_6s": 30, "ctr": 30}
 FFQ_WEIGHTS_DEFAULT = {"cpa": 30, "paid_starts": 25, "trial_to_paid_cvr": 20, "ctr": 15, "thumbstop_rate": 10}
+
+SAVES_PATH = "saved_analyses.json"
+
+
+# ── Save / load helpers ───────────────────────────────────────────────────────
+
+def _load_saves_file() -> list[dict]:
+    """Return the list of saved analyses from disk, or [] if none exist."""
+    if not os.path.exists(SAVES_PATH):
+        return []
+    try:
+        with open(SAVES_PATH, "r") as f:
+            data = json.load(f)
+        return data if isinstance(data, list) else []
+    except Exception:
+        return []
+
+
+def _write_saves_file(saves: list[dict]) -> None:
+    with open(SAVES_PATH, "w") as f:
+        json.dump(saves, f, indent=2)
+
+
+def list_saves() -> list[dict]:
+    """Return saved analyses sorted newest-first."""
+    saves = _load_saves_file()
+    return sorted(saves, key=lambda s: s.get("saved_at", ""), reverse=True)
+
+
+def save_analysis(name: str, df_raw: pd.DataFrame, goal: str, cpa_target: float) -> None:
+    """Persist the current analysis under the given name."""
+    saves = _load_saves_file()
+    new_save = {
+        "id": datetime.datetime.now().strftime("%Y%m%d_%H%M%S_%f"),
+        "name": name.strip() or "Untitled",
+        "saved_at": datetime.datetime.now().strftime("%Y-%m-%d %H:%M"),
+        "csv_data": df_raw.to_csv(index=False),
+        "goal": goal,
+        "cpa_target": cpa_target,
+    }
+    saves.append(new_save)
+    _write_saves_file(saves)
+
+
+def delete_save(save_id: str) -> None:
+    saves = _load_saves_file()
+    saves = [s for s in saves if s.get("id") != save_id]
+    _write_saves_file(saves)
+
+
+def load_save(save_id: str) -> dict | None:
+    saves = _load_saves_file()
+    for s in saves:
+        if s.get("id") == save_id:
+            return s
+    return None
 
 
 def normalise_columns(df: pd.DataFrame) -> pd.DataFrame:
@@ -1523,12 +1582,36 @@ def page_analyzer(
             "Paid Starts", "Trial Starts", "Efficient Paid Starts",
             "Efficient Trial Starts", "Creative Engagement", "Full Funnel Quality",
         ]
+        _default_goal_idx = 0
+        if st.session_state.get("loaded_goal") in goal_options:
+            _default_goal_idx = goal_options.index(st.session_state.loaded_goal)
+            st.session_state.loaded_goal = None
+
         goal_col, spacer = st.columns([2, 5])
         with goal_col:
-            goal = st.selectbox("Campaign Goal", goal_options, index=0)
+            goal = st.selectbox("Campaign Goal", goal_options, index=_default_goal_idx)
 
         df_ranked = rank_by_goal(df, goal, cpa_target=cpa_target, ce_weights=ce_weights, ffq_weights=ffq_weights)
         df_ranked = assign_decision_labels(df_ranked, cpa_target=cpa_target)
+
+        # ── Save this analysis ────────────────────────────────────────────────
+        with st.expander("💾 Save this analysis", expanded=False):
+            save_name_col, save_btn_col = st.columns([4, 1])
+            with save_name_col:
+                save_name = st.text_input(
+                    "Analysis name",
+                    placeholder="e.g. Week 12 LoopNote Review",
+                    label_visibility="collapsed",
+                    key="save_name_input",
+                )
+            with save_btn_col:
+                if st.button("Save", use_container_width=True, key="btn_save_analysis"):
+                    if save_name.strip():
+                        save_analysis(save_name, df_raw, goal, cpa_target)
+                        st.success(f"Saved as \"{save_name.strip()}\"")
+                        st.rerun()
+                    else:
+                        st.warning("Enter a name before saving.")
 
         st.divider()
 
@@ -2000,6 +2083,31 @@ if "df_raw" not in st.session_state:
     st.session_state.df_raw = None
 if "sheets_df" not in st.session_state:
     st.session_state.sheets_df = None
+if "loaded_goal" not in st.session_state:
+    st.session_state.loaded_goal = None
+if "pending_load_id" not in st.session_state:
+    st.session_state.pending_load_id = None
+if "pending_delete_id" not in st.session_state:
+    st.session_state.pending_delete_id = None
+
+# ── Process pending load / delete (must happen before sidebar renders) ────────
+if st.session_state.pending_load_id:
+    _save = load_save(st.session_state.pending_load_id)
+    if _save:
+        try:
+            _df, _warns = load_and_clean(StringIO(_save["csv_data"]))
+            st.session_state.df_raw = _df
+            st.session_state.warnings = _warns
+            st.session_state.loaded_goal = _save.get("goal")
+            if _save.get("cpa_target") is not None:
+                st.session_state["cpa_target_input"] = float(_save["cpa_target"])
+        except Exception as _load_err:
+            st.error(f"Could not restore saved analysis: {_load_err}")
+    st.session_state.pending_load_id = None
+
+if st.session_state.pending_delete_id:
+    delete_save(st.session_state.pending_delete_id)
+    st.session_state.pending_delete_id = None
 
 # ── Sidebar: navigation + advanced settings ───────────────────────────────────
 with st.sidebar:
@@ -2017,6 +2125,41 @@ with st.sidebar:
     st.divider()
     st.caption("Use the Integrations page to connect data sources, or load the built-in LoopNote sample on the Analyzer page.")
     st.divider()
+
+    # ── Saved analyses ────────────────────────────────────────────────────────
+    st.markdown(
+        "<div style='font-size:0.82rem;font-weight:700;color:#4F8EF7;text-transform:uppercase;"
+        "letter-spacing:0.08em;margin-bottom:6px;'>💾 Saved Analyses</div>",
+        unsafe_allow_html=True,
+    )
+    _all_saves = list_saves()
+    if not _all_saves:
+        st.caption("No saves yet. Run an analysis and save it from the Analyzer page.")
+    else:
+        for _s in _all_saves:
+            _sid = _s["id"]
+            _label = _html.escape(_s["name"])
+            _ts = _html.escape(_s.get("saved_at", ""))
+            _goal_tag = _html.escape(_s.get("goal", ""))
+            st.markdown(
+                f"<div style='background:#161B27;border:1px solid #2A3350;border-radius:8px;"
+                f"padding:8px 12px;margin-bottom:6px;'>"
+                f"<div style='font-size:0.88rem;font-weight:600;color:#FAFAFA;'>{_label}</div>"
+                f"<div style='font-size:0.75rem;color:#8A9BC8;margin-top:2px;'>{_ts}"
+                f"{' · ' + _goal_tag if _goal_tag else ''}</div>"
+                f"</div>",
+                unsafe_allow_html=True,
+            )
+            _load_col, _del_col = st.columns([3, 1])
+            with _load_col:
+                if st.button("Load", key=f"load_{_sid}", use_container_width=True):
+                    st.session_state.pending_load_id = _sid
+                    st.rerun()
+            with _del_col:
+                if st.button("✕", key=f"del_{_sid}", use_container_width=True, help="Delete this save"):
+                    st.session_state.pending_delete_id = _sid
+                    st.rerun()
+    st.divider()
     with st.expander("⚙️ Advanced settings", expanded=False):
         st.markdown("**CPA Target**")
         cpa_target = st.number_input(
@@ -2025,6 +2168,7 @@ with st.sidebar:
             max_value=10000.0,
             value=float(CPA_TARGET),
             step=5.0,
+            key="cpa_target_input",
             help="Creatives below this CPA are flagged as Scale candidates. Affects decision labels and chart reference lines.",
         )
 
