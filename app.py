@@ -1183,19 +1183,24 @@ def build_pdf_report(df: pd.DataFrame, goal: str, cpa_target: float) -> bytes:
     header_h = 7
     row_h = 6
 
-    pdf.set_fill_color(30, 58, 138)
-    pdf.set_text_color(255, 255, 255)
-    pdf.set_font("Helvetica", "B", 7.5)
-    for col_label, col_w, _ in tbl_cols:
-        pdf.cell(col_w, header_h, col_label, border=0, fill=True, align="C")
-    pdf.ln(header_h)
-
     ranked = df.reset_index(drop=True).copy()
     ranked.index = ranked.index + 1
+
+    def _render_table_header():
+        pdf.set_fill_color(30, 58, 138)
+        pdf.set_text_color(255, 255, 255)
+        pdf.set_font("Helvetica", "B", 7.5)
+        for col_label, col_w, _ in tbl_cols:
+            pdf.cell(col_w, header_h, col_label, border=0, fill=True, align="C")
+        pdf.ln(header_h)
+        pdf.set_text_color(0, 0, 0)
+
+    _render_table_header()
 
     for i, row in ranked.iterrows():
         if pdf.get_y() > 260:
             pdf.add_page()
+            _render_table_header()
         decision = str(row.get("decision_label", "")) if "decision_label" in ranked.columns else ""
         txt_rgb, fill_rgb = _PDF_DECISION_COLORS.get(decision, ((50, 50, 50), (248, 250, 252)))
 
@@ -1238,8 +1243,8 @@ def build_pdf_report(df: pd.DataFrame, goal: str, cpa_target: float) -> bytes:
 
     # ── 3. Chart image ───────────────────────────────────────────────────────
     png_result = build_charts_png(df)
+    pdf.section_title("Chart Summary")
     if isinstance(png_result, bytes) and png_result:
-        pdf.section_title("Chart Summary")
         img_buf = BytesIO(png_result)
         img_w = 180
         img_h = round(img_w * 900 / 1400)
@@ -1247,6 +1252,13 @@ def build_pdf_report(df: pd.DataFrame, goal: str, cpa_target: float) -> bytes:
             pdf.add_page()
         pdf.image(img_buf, x=15, y=pdf.get_y(), w=img_w)
         pdf.ln(img_h + 4)
+    else:
+        pdf.set_font("Helvetica", "I", 8.5)
+        pdf.set_text_color(120, 120, 120)
+        reason = str(png_result) if isinstance(png_result, Exception) else "insufficient data"
+        pdf.cell(0, 7, f"Chart unavailable ({reason})", ln=True)
+        pdf.set_text_color(0, 0, 0)
+        pdf.ln(2)
 
     # ── 4. Pattern analysis ──────────────────────────────────────────────────
     patterns = get_patterns_text(df)
@@ -1584,7 +1596,7 @@ def page_analyzer(
             try:
                 pdf_bytes = build_pdf_report(df_ranked, goal, cpa_target)
                 today_str = datetime.date.today().strftime("%Y-%m-%d")
-                safe_goal = goal.lower().replace(" ", "_")
+                safe_goal = re.sub(r"[^\w]+", "_", goal.lower()).strip("_")
                 st.download_button(
                     label="⬇ Download PDF Report",
                     data=pdf_bytes,
