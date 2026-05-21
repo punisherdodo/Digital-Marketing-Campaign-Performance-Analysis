@@ -2,6 +2,11 @@
 headless = true
 port = 5000
 enableCORS = false
+
+# enableXsrfProtection is false because this app runs inside Replit's proxied
+# iframe, which strips the XSRF cookie headers Streamlit expects.
+# If you deploy outside Replit (Streamlit Community Cloud, VPS, Docker, etc.)
+# set this back to true for proper CSRF protection.
 enableXsrfProtection = false
 
 [theme]

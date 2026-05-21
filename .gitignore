@@ -1,6 +1,33 @@
 # See https://docs.github.com/en/get-started/getting-started-with-git/ignoring-files for more about ignoring files.
 
-# compiled output
+# ── Python ────────────────────────────────────────────────────────────────────
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.Python
+*.egg-info/
+dist/
+build/
+
+# ── Runtime / user data (never commit to source control) ─────────────────────
+# saved_analyses.json contains user-uploaded ad data and saved analysis state.
+saved_analyses.json
+
+# ── Replit platform files (not needed outside Replit) ────────────────────────
+.replit
+.replitignore
+.cache/
+.config/
+.local/
+.agents/
+.pythonlibs/
+
+# ── Uploaded / generated assets that may contain proprietary data ─────────────
+attached_assets/
+
+# ── Node / JS dependencies ────────────────────────────────────────────────────
+node_modules
 dist
 tmp
 out-tsc
@@ -8,10 +35,7 @@ out-tsc
 .expo
 .expo-shared
 
-# dependencies
-node_modules
-
-# IDEs and editors
+# ── IDEs and editors ─────────────────────────────────────────────────────────
 /.idea
 .project
 .classpath
@@ -19,15 +43,13 @@ node_modules
 *.launch
 .settings/
 *.sublime-workspace
-
-# IDE - VSCode
 .vscode/*
 !.vscode/settings.json
 !.vscode/tasks.json
 !.vscode/launch.json
 !.vscode/extensions.json
 
-# misc
+# ── Misc ──────────────────────────────────────────────────────────────────────
 /.sass-cache
 /connect.lock
 /coverage
@@ -36,14 +58,5 @@ npm-debug.log
 yarn-error.log
 testem.log
 /typings
-
-# System Files
 .DS_Store
 Thumbs.db
-
-.cursor/rules/nx-rules.mdc
-.github/instructions/nx.instructions.md
-
-# Replit
-.cache/
-.local/
