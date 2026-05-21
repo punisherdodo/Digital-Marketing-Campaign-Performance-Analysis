@@ -525,11 +525,20 @@ def length_bucket(s: float) -> str:
         return "Over 40s"
 
 
-def render_summary_cards(df: pd.DataFrame, goal: str):
+def render_summary_cards(df: pd.DataFrame, goal: str, metric_targets: dict | None = None):
+    mt = metric_targets or {}
+
     total_spend = df["spend"].sum() if "spend" in df.columns else np.nan
     total_trials = df["trial_starts"].sum() if "trial_starts" in df.columns else np.nan
     total_paid = df["paid_starts"].sum() if "paid_starts" in df.columns else np.nan
     blended_cpa = (total_spend / total_paid) if (not np.isnan(total_spend) and total_paid) else np.nan
+
+    # Averages for target comparison
+    avg_ctr = df["ctr"].mean() if "ctr" in df.columns else np.nan
+    avg_thumbstop = df["thumbstop_rate"].mean() if "thumbstop_rate" in df.columns else np.nan
+    avg_hold = df["hold_6s"].mean() if "hold_6s" in df.columns else np.nan
+    avg_cvr = df["trial_to_paid_cvr"].mean() if "trial_to_paid_cvr" in df.columns else np.nan
+    blended_cpt = (total_spend / total_trials) if (not np.isnan(total_spend) and not np.isnan(total_trials) and total_trials > 0) else np.nan
 
     best_creative = "—"
     if not df.empty and "creative_id" in df.columns:
@@ -540,6 +549,18 @@ def render_summary_cards(df: pd.DataFrame, goal: str):
 
     blended_cpa_str = (f"${blended_cpa:,.2f}" if not np.isnan(blended_cpa) else "—")
 
+    def _cpa_delta(val, target):
+        if target and not np.isnan(val):
+            diff = val - target
+            return f"${abs(diff):,.0f} {'above' if diff > 0 else 'below'} target"
+        return None
+
+    def _higher_delta(val, target, label="%"):
+        if target and not np.isnan(val):
+            diff = val - target
+            return f"{abs(diff):.1f}{label} {'above' if diff > 0 else 'below'} target"
+        return None
+
     row1 = st.columns(4)
     with row1[0]:
         st.metric("Spend", fmt_currency(total_spend))
@@ -548,7 +569,14 @@ def render_summary_cards(df: pd.DataFrame, goal: str):
     with row1[2]:
         st.metric("Paid", fmt_num(total_paid))
     with row1[3]:
-        st.metric("Blended CPA", blended_cpa_str)
+        cpa_tgt = mt.get("cpa")
+        st.metric(
+            "Blended CPA",
+            blended_cpa_str,
+            delta=_cpa_delta(blended_cpa, cpa_tgt) if not np.isnan(blended_cpa) else None,
+            delta_color="inverse",
+            help=f"Target: ${cpa_tgt:,.0f}" if cpa_tgt else None,
+        )
 
     row2 = st.columns(3)
     with row2[0]:
@@ -557,6 +585,44 @@ def render_summary_cards(df: pd.DataFrame, goal: str):
         st.metric("Scale", int(scale_n))
     with row2[2]:
         st.metric("Cut", int(cut_n))
+
+    # ── Metric target row (only shown when targets are set) ───────────────────
+    active = {k: v for k, v in mt.items() if v and k not in ("cpa",)}
+    if active:
+        st.markdown(
+            "<p style='font-size:0.78rem;color:#8A9BC8;margin-top:8px;margin-bottom:2px;'>"
+            "vs. metric targets</p>",
+            unsafe_allow_html=True,
+        )
+        tgt_cols_order = [
+            ("cpt",              "CPT",          blended_cpt,  True,  "$"),
+            ("ctr",              "Avg CTR",      avg_ctr,      False, "%"),
+            ("thumbstop_rate",   "Avg Thumbstop",avg_thumbstop,False, "%"),
+            ("hold_6s",          "Avg 6s Hold",  avg_hold,     False, "%"),
+            ("trial_to_paid_cvr","Avg CVR",      avg_cvr,      False, "%"),
+            ("paid_starts",      "Paid Starts",  total_paid,   False, ""),
+        ]
+        shown = [(lbl, val, inv, sfx) for k, lbl, val, inv, sfx in tgt_cols_order if k in active and not np.isnan(val)]
+        if shown:
+            t_cols = st.columns(min(len(shown), 6))
+            for i, (lbl, val, inv, sfx) in enumerate(shown):
+                k = [r[0] for r in tgt_cols_order if r[1] == lbl][0]
+                tgt = active[k]
+                diff = val - tgt
+                if sfx == "$":
+                    val_str = f"${val:,.0f}"
+                    delta_str = f"${abs(diff):,.0f} {'above' if diff > 0 else 'below'}"
+                elif sfx == "%":
+                    val_str = f"{val:.1f}%"
+                    delta_str = f"{abs(diff):.1f}pp {'above' if diff > 0 else 'below'}"
+                else:
+                    val_str = f"{int(val):,}"
+                    delta_str = f"{abs(int(diff)):,} {'above' if diff > 0 else 'below'}"
+                # lower_is_better metrics: CPA, CPT → invert colour logic
+                d_color = "inverse" if inv else "normal"
+                with t_cols[i]:
+                    st.metric(lbl, val_str, delta=delta_str, delta_color=d_color,
+                              help=f"Target: {f'${tgt:,.0f}' if sfx == '$' else f'{tgt:.1f}{sfx}'}")
 
 
 _DECISION_LABEL_COLORS = {
@@ -624,7 +690,8 @@ def render_ranking_table(df: pd.DataFrame):
     st.dataframe(styler, use_container_width=True, height=400)
 
 
-def render_charts(df: pd.DataFrame, cpa_target: float = CPA_TARGET):
+def render_charts(df: pd.DataFrame, cpa_target: float = CPA_TARGET, metric_targets: dict | None = None):
+    mt = metric_targets or {}
     chart_bg = "#0E1117"
     grid_color = "#1E2A45"
     font_color = "#FAFAFA"
@@ -644,8 +711,13 @@ def render_charts(df: pd.DataFrame, cpa_target: float = CPA_TARGET):
             )
             fig.add_hline(
                 y=cpa_target, line_dash="dash", line_color="#4F8EF7",
-                annotation_text=f"${cpa_target:,.0f} Target", annotation_font_color="#4F8EF7",
+                annotation_text=f"${cpa_target:,.0f} CPA target", annotation_font_color="#4F8EF7",
             )
+            if mt.get("cpt") and "cpt" in df.columns:
+                fig.add_hline(
+                    y=mt["cpt"], line_dash="dot", line_color="#fbbf24",
+                    annotation_text=f"${mt['cpt']:,.0f} CPT target", annotation_font_color="#fbbf24",
+                )
             fig.update_layout(
                 paper_bgcolor=chart_bg, plot_bgcolor=chart_bg,
                 font_color=font_color, showlegend=False,
@@ -670,6 +742,11 @@ def render_charts(df: pd.DataFrame, cpa_target: float = CPA_TARGET):
                 color="platform" if "platform" in d.columns else None,
                 color_discrete_map=color_map,
             )
+            if mt.get("paid_starts"):
+                fig.add_hline(
+                    y=mt["paid_starts"], line_dash="dash", line_color="#34d399",
+                    annotation_text=f"{int(mt['paid_starts']):,} min target", annotation_font_color="#34d399",
+                )
             fig.update_layout(
                 paper_bgcolor=chart_bg, plot_bgcolor=chart_bg,
                 font_color=font_color, legend_title_text="Platform",
@@ -703,6 +780,13 @@ def render_charts(df: pd.DataFrame, cpa_target: float = CPA_TARGET):
                 x=cpa_target, line_dash="dash", line_color="#4F8EF7",
                 annotation_text=f"${cpa_target:,.0f} CPA target", annotation_font_color="#4F8EF7",
             )
+            if mt.get("ctr"):
+                fig.add_hline(
+                    y=mt["ctr"], line_dash="dash", line_color="#34d399",
+                    annotation_text=f"{mt['ctr']:.1f}% CTR target", annotation_font_color="#34d399",
+                )
+            if mt.get("thumbstop_rate") and "thumbstop_rate" in df.columns:
+                pass  # thumbstop handled in its own chart section
             fig.update_traces(textposition="top center", textfont_size=9)
             fig.update_layout(
                 paper_bgcolor=chart_bg, plot_bgcolor=chart_bg,
@@ -2270,7 +2354,7 @@ def page_analyzer(
         st.divider()
 
         st.markdown("<div class='section-header'>Performance Summary</div>", unsafe_allow_html=True)
-        render_summary_cards(df_ranked, goal)
+        render_summary_cards(df_ranked, goal, metric_targets=st.session_state.get("_metric_targets"))
 
         if kpi_warnings:
             with st.expander("⚠️  Some KPIs could not be calculated — expand for details"):
@@ -2318,7 +2402,7 @@ def page_analyzer(
         st.divider()
 
         st.markdown("<div class='section-header'>Visuals</div>", unsafe_allow_html=True)
-        render_charts(df_ranked, cpa_target=cpa_target)
+        render_charts(df_ranked, cpa_target=cpa_target, metric_targets=st.session_state.get("_metric_targets"))
         render_chart_csv_downloads(df_ranked)
 
         # ── Benchmark comparison ──────────────────────────────────────────────
@@ -3029,6 +3113,50 @@ with st.sidebar:
             key="cpa_target_input",
             help="Creatives below this CPA are flagged as Scale candidates. Affects decision labels and chart reference lines.",
         )
+
+        st.markdown("---")
+        st.markdown("**Metric Targets**")
+        st.caption(
+            "Set thresholds for each KPI. Appear as dashed reference lines on charts "
+            "and as ↑/↓ deltas in the summary cards. Set to 0 to disable."
+        )
+        _mt_c1, _mt_c2 = st.columns(2)
+        with _mt_c1:
+            _tgt_cpt = st.number_input(
+                "CPT Target ($)", min_value=0.0, value=0.0, step=5.0, key="tgt_cpt",
+                help="Target Cost per Trial Start.",
+            )
+            _tgt_ctr = st.number_input(
+                "CTR Target (%)", min_value=0.0, value=0.0, step=0.1, key="tgt_ctr",
+                help="Minimum acceptable Click-Through Rate.",
+            )
+            _tgt_thumbstop = st.number_input(
+                "Thumbstop Target (%)", min_value=0.0, value=0.0, step=0.5, key="tgt_thumbstop",
+                help="Minimum acceptable Thumbstop Rate.",
+            )
+        with _mt_c2:
+            _tgt_hold = st.number_input(
+                "6s Hold Rate Target (%)", min_value=0.0, value=0.0, step=0.5, key="tgt_hold",
+                help="Minimum acceptable 6-second Hold Rate.",
+            )
+            _tgt_cvr = st.number_input(
+                "Trial→Paid CVR Target (%)", min_value=0.0, value=0.0, step=0.5, key="tgt_cvr",
+                help="Minimum acceptable Trial-to-Paid conversion rate.",
+            )
+            _tgt_paid_min = st.number_input(
+                "Min Paid Starts", min_value=0, value=0, step=5, key="tgt_paid_min",
+                help="Minimum paid starts threshold. Creatives below this line on the chart are flagged.",
+            )
+        _metric_targets = {
+            "cpa":              cpa_target,
+            "cpt":              _tgt_cpt       if _tgt_cpt > 0       else None,
+            "ctr":              _tgt_ctr       if _tgt_ctr > 0       else None,
+            "thumbstop_rate":   _tgt_thumbstop if _tgt_thumbstop > 0 else None,
+            "hold_6s":          _tgt_hold      if _tgt_hold > 0      else None,
+            "trial_to_paid_cvr":_tgt_cvr       if _tgt_cvr > 0      else None,
+            "paid_starts":      _tgt_paid_min  if _tgt_paid_min > 0  else None,
+        }
+        st.session_state["_metric_targets"] = _metric_targets
 
         st.markdown("---")
         st.markdown("**Benchmark Targets**")
