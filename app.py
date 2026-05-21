@@ -1,4 +1,5 @@
 import re
+import math
 import datetime
 import streamlit as st
 import pandas as pd
@@ -1661,6 +1662,494 @@ def render_integration_card(
 
 
 # ══════════════════════════════════════════════════════════════════════════════
+# FEATURE: CUSTOM COLUMN MAPPER
+# ══════════════════════════════════════════════════════════════════════════════
+
+_EXPECTED_COLS = {
+    "creative_id": "Creative ID",
+    "platform": "Platform",
+    "spend": "Spend ($)",
+    "paid_starts": "Paid Starts",
+    "trial_starts": "Trial Starts",
+    "ctr": "CTR (%)",
+    "thumbstop_rate": "Thumbstop Rate (%)",
+    "hold_6s": "6s Hold Rate (%)",
+}
+
+
+def render_column_mapper(df: pd.DataFrame) -> pd.DataFrame | None:
+    """Show UI to map unrecognised column names. Returns remapped df or None."""
+    missing = [k for k in _EXPECTED_COLS if k not in df.columns]
+    if not missing:
+        return None
+    with st.expander(f"⚙️ Column Mapper — {len(missing)} column(s) not auto-detected", expanded=True):
+        st.info(
+            "Some expected columns were not found automatically. "
+            "Use the dropdowns to map your column names, or leave as '(skip)' to continue without them."
+        )
+        options = ["(skip)"] + list(df.columns)
+        mapping: dict[str, str] = {}
+        num_cols = min(len(missing), 4)
+        mapper_cols = st.columns(num_cols)
+        for idx, col_key in enumerate(missing):
+            with mapper_cols[idx % num_cols]:
+                chosen = st.selectbox(
+                    _EXPECTED_COLS[col_key],
+                    options,
+                    key=f"colmap_{col_key}",
+                )
+                if chosen != "(skip)":
+                    mapping[chosen] = col_key
+        if mapping:
+            return df.rename(columns=mapping)
+    return None
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# FEATURE: DATE COLUMN DETECTION & CREATIVE FATIGUE
+# ══════════════════════════════════════════════════════════════════════════════
+
+_DATE_COL_NAMES = {"date", "week", "period", "month", "week_num", "day", "period_label", "run_date"}
+
+
+def detect_date_col(df: pd.DataFrame) -> str | None:
+    for c in df.columns:
+        if c.lower() in _DATE_COL_NAMES:
+            return c
+    return None
+
+
+def detect_fatigue_ids(df: pd.DataFrame) -> set:
+    """Return creative_ids with monotonically rising CPA or falling CTR across periods."""
+    date_col = detect_date_col(df)
+    if date_col is None or "creative_id" not in df.columns:
+        return set()
+    fatigue = set()
+    for cid, sub in df.groupby("creative_id"):
+        sub = sub.sort_values(date_col)
+        if "cpa" in sub.columns:
+            vals = sub["cpa"].dropna().tolist()
+            if len(vals) >= 2 and all(vals[i] < vals[i + 1] for i in range(len(vals) - 1)):
+                fatigue.add(cid)
+        if "ctr" in sub.columns:
+            vals = sub["ctr"].dropna().tolist()
+            if len(vals) >= 2 and all(vals[i] > vals[i + 1] for i in range(len(vals) - 1)):
+                fatigue.add(cid)
+    return fatigue
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# FEATURE: STATISTICAL SIGNIFICANCE
+# ══════════════════════════════════════════════════════════════════════════════
+
+def compute_significance(df: pd.DataFrame) -> pd.DataFrame:
+    """Add stat_sig column — two-proportion z-test vs. rest of cohort."""
+    df = df.copy()
+    if "trial_starts" not in df.columns or "paid_starts" not in df.columns:
+        return df
+    total_trials = df["trial_starts"].sum(skipna=True)
+    total_paid = df["paid_starts"].sum(skipna=True)
+    labels = []
+    for _, row in df.iterrows():
+        n1 = row.get("trial_starts", 0)
+        x1 = row.get("paid_starts", 0)
+        if pd.isna(n1) or pd.isna(x1) or n1 <= 0:
+            labels.append("—"); continue
+        n2 = total_trials - n1
+        x2 = total_paid - x1
+        if n2 <= 0 or (x1 + x2) <= 0:
+            labels.append("—"); continue
+        p_pool = (x1 + x2) / (n1 + n2)
+        denom = math.sqrt(p_pool * (1 - p_pool) * (1 / n1 + 1 / n2)) if p_pool not in (0, 1) else 0
+        if denom == 0:
+            labels.append("—"); continue
+        z = abs((x1 / n1) - (x2 / n2)) / denom
+        if z > 2.576:   labels.append("✓ 99% sig.")
+        elif z > 1.96:  labels.append("✓ 95% sig.")
+        elif z > 1.645: labels.append("~ 90% sig.")
+        else:           labels.append("Not sig.")
+    df["stat_sig"] = labels
+    return df
+
+
+def render_significance(df: pd.DataFrame):
+    if "stat_sig" not in df.columns:
+        st.info("Statistical significance requires Trial Starts + Paid Starts columns.")
+        return
+    st.caption(
+        "Two-proportion z-test: compares each creative's Trial→Paid CVR against the rest of the cohort. "
+        "✓ 95% means we're 95% confident this creative's conversion rate is genuinely different."
+    )
+    show_cols = [c for c in ["creative_id", "platform", "trial_starts", "paid_starts", "cpa", "stat_sig"] if c in df.columns]
+    d = df[show_cols].copy().reset_index(drop=True)
+    d.index = d.index + 1
+    d.index.name = "Rank"
+    d = d.rename(columns={
+        "creative_id": "Creative", "platform": "Platform",
+        "trial_starts": "Trial Starts", "paid_starts": "Paid Starts",
+        "cpa": "CPA ($)", "stat_sig": "Significance",
+    })
+
+    def _color_sig(val):
+        v = str(val)
+        if "99%" in v: return "color:#34d399;font-weight:bold"
+        if "95%" in v: return "color:#4F8EF7;font-weight:bold"
+        if "90%" in v: return "color:#fbbf24"
+        if "Not" in v:  return "color:#8A9BC8"
+        return ""
+
+    styler = d.style.map(_color_sig, subset=["Significance"]) if "Significance" in d.columns else d.style
+    st.dataframe(styler, use_container_width=True)
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# FEATURE: BUDGET REALLOCATION
+# ══════════════════════════════════════════════════════════════════════════════
+
+def render_budget_reallocation(df: pd.DataFrame):
+    if not {"spend", "cpa", "creative_id"}.issubset(df.columns):
+        st.info("Need Spend + CPA + Creative ID to generate a reallocation plan.")
+        return
+    valid = df[["creative_id", "spend", "cpa"] +
+               ([c] for c in ["paid_starts", "decision_label"] if c in df.columns and False)].copy()
+    valid = df[[c for c in ["creative_id", "spend", "cpa", "paid_starts", "decision_label"] if c in df.columns]].dropna(subset=["cpa", "spend"]).copy()
+    valid = valid[valid["cpa"] > 0]
+    if len(valid) < 2:
+        st.info("Need at least 2 creatives with spend + CPA data.")
+        return
+    total_budget = valid["spend"].sum()
+    valid["efficiency"] = 1.0 / valid["cpa"]
+    total_eff = valid["efficiency"].sum()
+    valid["rec_spend"] = (valid["efficiency"] / total_eff * total_budget).round(0)
+    valid["delta"] = (valid["rec_spend"] - valid["spend"]).round(0)
+    valid["exp_paid"] = (valid["rec_spend"] / valid["cpa"]).round(0)
+    st.caption(
+        f"Same total budget (${total_budget:,.0f}) reallocated proportionally to 1/CPA — "
+        "lower CPA gets more. Green = increase, red = decrease."
+    )
+    show_cols = ["creative_id", "spend", "rec_spend", "delta", "cpa", "exp_paid"] + \
+                (["decision_label"] if "decision_label" in valid.columns else [])
+    display = valid[show_cols].copy().reset_index(drop=True)
+    display.index = display.index + 1
+    display.columns = ["Creative", "Current Spend ($)", "Rec. Spend ($)", "Delta ($)", "CPA ($)", "Exp. Paid Starts"] + \
+                      (["Decision"] if "decision_label" in valid.columns else [])
+
+    def _color_delta(v):
+        try:
+            return "color:#34d399" if float(v) > 0 else ("color:#f87171" if float(v) < 0 else "")
+        except Exception:
+            return ""
+
+    styler = display.style.map(_color_delta, subset=["Delta ($)"])
+    st.dataframe(styler, use_container_width=True)
+    st.download_button(
+        "⬇ Download Reallocation Plan as CSV",
+        data=display.to_csv(index=False).encode("utf-8"),
+        file_name="budget_reallocation.csv", mime="text/csv", key="dl_realloc",
+    )
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# FEATURE: SPEND PACING
+# ══════════════════════════════════════════════════════════════════════════════
+
+def render_spend_pacing(df: pd.DataFrame):
+    if "spend" not in df.columns:
+        st.info("Need a Spend column for pacing.")
+        return
+    p1, p2 = st.columns(2)
+    with p1:
+        monthly_budget = st.number_input(
+            "Monthly Budget ($)", min_value=0.0, value=10000.0, step=500.0, key="pacing_budget"
+        )
+    with p2:
+        days_elapsed = st.number_input(
+            "Days elapsed in month", min_value=1, max_value=31,
+            value=min(datetime.date.today().day, 31), key="pacing_days",
+        )
+    days_in_month = 30
+    paced = monthly_budget * days_elapsed / days_in_month
+    total_spend = df["spend"].sum(skipna=True)
+    pacing_pct = (total_spend / paced * 100) if paced > 0 else 0
+    delta_v = total_spend - paced
+    status = "over-pacing" if delta_v > 0 else "under-pacing"
+    m1, m2, m3, m4 = st.columns(4)
+    m1.metric("Total Spend to Date", f"${total_spend:,.0f}")
+    m2.metric("Paced Budget", f"${paced:,.0f}")
+    m3.metric("vs. Pace", f"${abs(delta_v):,.0f} {status}")
+    m4.metric("Pacing Rate", f"{pacing_pct:.1f}%")
+    if "creative_id" in df.columns:
+        pc = df.groupby("creative_id")["spend"].sum(numeric_only=True).reset_index()
+        pc.columns = ["Creative", "Spend to Date ($)"]
+        pc["Share (%)"] = (pc["Spend to Date ($)"] / total_spend * 100).round(1)
+        pc["Projected Month-End ($)"] = (pc["Spend to Date ($)"] / days_elapsed * days_in_month).round(0)
+        st.dataframe(
+            pc.sort_values("Spend to Date ($)", ascending=False).reset_index(drop=True),
+            use_container_width=True,
+        )
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# FEATURE: BENCHMARK COMPARISON
+# ══════════════════════════════════════════════════════════════════════════════
+
+def render_benchmark_comparison(df: pd.DataFrame, benchmarks: dict):
+    if "platform" not in df.columns:
+        st.info("Need a Platform column for benchmark comparison.")
+        return
+    rows = []
+    for plat, grp in df.groupby("platform"):
+        row: dict = {"Platform": plat}
+        if "ctr" in grp.columns:
+            avg = grp["ctr"].mean(skipna=True)
+            bench = benchmarks.get(f"{plat}_ctr")
+            row["Your Avg CTR (%)"] = round(avg, 2) if pd.notna(avg) else "—"
+            if bench:
+                row["Benchmark CTR (%)"] = bench
+                if pd.notna(avg):
+                    d = avg - bench
+                    row["CTR Delta"] = f"+{d:.2f}%" if d >= 0 else f"{d:.2f}%"
+        if "cpa" in grp.columns:
+            avg = grp["cpa"].mean(skipna=True)
+            bench = benchmarks.get(f"{plat}_cpa")
+            row["Your Avg CPA ($)"] = round(avg, 2) if pd.notna(avg) else "—"
+            if bench:
+                row["Benchmark CPA ($)"] = bench
+                if pd.notna(avg):
+                    d = avg - bench
+                    row["CPA Delta"] = f"+${d:.0f} above" if d > 0 else f"${-d:.0f} below"
+        if "thumbstop_rate" in grp.columns:
+            avg = grp["thumbstop_rate"].mean(skipna=True)
+            bench = benchmarks.get(f"{plat}_thumbstop")
+            row["Your Avg Thumbstop (%)"] = round(avg, 2) if pd.notna(avg) else "—"
+            if bench:
+                row["Benchmark Thumbstop (%)"] = bench
+        rows.append(row)
+    if rows:
+        st.caption("Set platform benchmark targets in Advanced Settings → Benchmark Targets to unlock delta columns.")
+        st.dataframe(pd.DataFrame(rows), use_container_width=True)
+    else:
+        st.info("No platform data available.")
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# FEATURE: TREND SPARKLINES
+# ══════════════════════════════════════════════════════════════════════════════
+
+def render_trend_sparklines(df: pd.DataFrame):
+    date_col = detect_date_col(df)
+    if date_col is None:
+        st.info(
+            "No date/period column detected. Add a column named 'Week', 'Date', or 'Period' "
+            "to your data to see per-creative trend sparklines."
+        )
+        return
+    if "creative_id" not in df.columns:
+        st.info("Need a Creative ID column for sparklines.")
+        return
+    metric_options = [m for m in ["cpa", "ctr", "paid_starts", "thumbstop_rate"] if m in df.columns]
+    if not metric_options:
+        st.info("No metric columns available for sparklines.")
+        return
+    metric_labels = {
+        "cpa": "CPA ($)", "ctr": "CTR (%)",
+        "paid_starts": "Paid Starts", "thumbstop_rate": "Thumbstop (%)",
+    }
+    sel_metric = st.selectbox(
+        "Metric to trend",
+        metric_options,
+        format_func=lambda m: metric_labels[m],
+        key="sparkline_metric",
+    )
+    creatives = [
+        c for c in df["creative_id"].unique()
+        if df[df["creative_id"] == c][sel_metric].dropna().shape[0] >= 2
+    ]
+    if not creatives:
+        st.info("Need at least 2 data points per creative to draw a trend. Check your date/period column.")
+        return
+    cols = st.columns(min(len(creatives), 4))
+    for i, cid in enumerate(creatives):
+        sub = df[df["creative_id"] == cid].sort_values(date_col)
+        with cols[i % 4]:
+            fig = px.line(
+                sub, x=date_col, y=sel_metric, markers=True,
+                labels={sel_metric: "", date_col: ""},
+                title=str(cid),
+            )
+            fig.update_layout(
+                height=160, margin=dict(t=30, b=5, l=10, r=10),
+                paper_bgcolor="#161B27", plot_bgcolor="#161B27",
+                font_color="#FAFAFA", showlegend=False,
+                xaxis=dict(showticklabels=False, gridcolor="#1E2A45"),
+                yaxis=dict(gridcolor="#1E2A45"),
+            )
+            fig.update_traces(line_color="#4F8EF7", marker_color="#34d399")
+            st.plotly_chart(fig, use_container_width=True)
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# FEATURE: SUMMARY SNIPPET
+# ══════════════════════════════════════════════════════════════════════════════
+
+def build_summary_snippet(df: pd.DataFrame, goal: str, cpa_target: float) -> str:
+    lines = [
+        f"Creative Performance Summary — {datetime.date.today().strftime('%B %d, %Y')}",
+        f"Goal: {goal}  |  CPA Target: ${cpa_target:,.0f}",
+        "",
+    ]
+    if not df.empty and "creative_id" in df.columns:
+        top = df.iloc[0]
+        lines.append(f"Top creative: {top['creative_id']}")
+        if "cpa" in df.columns and pd.notna(top.get("cpa")):
+            lines.append(f"  - CPA: ${top['cpa']:,.2f}")
+        if "paid_starts" in df.columns and pd.notna(top.get("paid_starts")):
+            lines.append(f"  - Paid Starts: {int(top['paid_starts']):,}")
+        if "decision_label" in df.columns:
+            lines.append(f"  - Action: {top.get('decision_label', '')}")
+        lines.append("")
+    if "decision_label" in df.columns:
+        for label in ["Scale", "Keep Testing", "Fix Funnel", "Cut"]:
+            ids = df[df["decision_label"] == label]["creative_id"].tolist()
+            if ids:
+                lines.append(f"{label}: {', '.join(str(c) for c in ids)}")
+        lines.append("")
+    if "spend" in df.columns:
+        lines.append(f"Total Spend: ${df['spend'].sum(skipna=True):,.0f}")
+    if "paid_starts" in df.columns:
+        total_paid = df["paid_starts"].sum(skipna=True)
+        lines.append(f"Total Paid Starts: {int(total_paid):,}")
+        if "spend" in df.columns and total_paid > 0:
+            lines.append(f"Blended CPA: ${df['spend'].sum(skipna=True) / total_paid:,.2f}")
+    lines += ["", "Generated by Creative Performance Analyzer"]
+    return "\n".join(lines)
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# FEATURE: POWERPOINT EXPORT
+# ══════════════════════════════════════════════════════════════════════════════
+
+def build_pptx_report(df: pd.DataFrame, goal: str, cpa_target: float) -> bytes:
+    from pptx import Presentation as _Prs
+    from pptx.util import Inches, Pt
+    from pptx.dml.color import RGBColor
+    from pptx.enum.text import PP_ALIGN
+
+    prs = _Prs()
+    prs.slide_width = Inches(13.33)
+    prs.slide_height = Inches(7.5)
+    blank = prs.slide_layouts[6]
+
+    def _txt(slide, left, top, width, height, text, size=13, bold=False,
+             color=(250, 250, 250), align=PP_ALIGN.LEFT):
+        box = slide.shapes.add_textbox(Inches(left), Inches(top), Inches(width), Inches(height))
+        tf = box.text_frame
+        tf.word_wrap = True
+        p = tf.paragraphs[0]
+        p.text = sanitize_pdf_text(str(text))
+        p.font.size = Pt(size)
+        p.font.bold = bold
+        p.font.color.rgb = RGBColor(*color)
+        p.alignment = align
+
+    def _bg(slide, color=(0x0E, 0x11, 0x17)):
+        bg = slide.shapes.add_shape(1, Inches(0), Inches(0), Inches(13.33), Inches(7.5))
+        bg.fill.solid()
+        bg.fill.fore_color.rgb = RGBColor(*color)
+        bg.line.fill.background()
+
+    # ── Slide 1: Cover ────────────────────────────────────────────────────────
+    s1 = prs.slides.add_slide(blank)
+    _bg(s1)
+    _txt(s1, 1.5, 2.0, 10, 1.4, "Creative Performance Report",
+         size=36, bold=True, color=(0x4F, 0x8E, 0xF7), align=PP_ALIGN.CENTER)
+    _txt(s1, 1.5, 3.6, 10, 0.7,
+         f"Goal: {goal}  |  CPA Target: ${cpa_target:,.0f}  |  {datetime.date.today().strftime('%B %d, %Y')}",
+         size=14, color=(0x8A, 0x9B, 0xC8), align=PP_ALIGN.CENTER)
+
+    # ── Slide 2: Summary metrics ──────────────────────────────────────────────
+    s2 = prs.slides.add_slide(blank)
+    _bg(s2)
+    _txt(s2, 0.5, 0.2, 12, 0.7, "Performance Summary", size=22, bold=True, color=(0x4F, 0x8E, 0xF7))
+    metrics: list[tuple[str, str]] = []
+    if "spend" in df.columns:
+        metrics.append(("Total Spend", f"${df['spend'].sum(skipna=True):,.0f}"))
+    if "paid_starts" in df.columns:
+        tp = df["paid_starts"].sum(skipna=True)
+        metrics.append(("Paid Starts", f"{int(tp):,}"))
+        if "spend" in df.columns and tp > 0:
+            metrics.append(("Blended CPA", f"${df['spend'].sum(skipna=True)/tp:,.2f}"))
+    if not df.empty and "creative_id" in df.columns:
+        metrics.append(("Top Creative", str(df.iloc[0]["creative_id"])))
+    if "decision_label" in df.columns:
+        metrics.append(("Scale", str((df["decision_label"] == "Scale").sum())))
+        metrics.append(("Cut", str((df["decision_label"] == "Cut").sum())))
+    cw = 1.8
+    for i, (lbl, val) in enumerate(metrics[:6]):
+        x = 0.5 + i * (cw + 0.22)
+        box = s2.shapes.add_shape(1, Inches(x), Inches(1.2), Inches(cw), Inches(1.5))
+        box.fill.solid(); box.fill.fore_color.rgb = RGBColor(0x16, 0x1B, 0x27)
+        box.line.color.rgb = RGBColor(0x2A, 0x33, 0x50)
+        _txt(s2, x + 0.05, 1.28, cw - 0.1, 0.4, lbl, size=8, color=(0x8A, 0x9B, 0xC8), align=PP_ALIGN.CENTER)
+        _txt(s2, x + 0.05, 1.65, cw - 0.1, 0.85, val, size=17, bold=True, color=(0xFF, 0xFF, 0xFF), align=PP_ALIGN.CENTER)
+
+    # ── Slide 3: Rankings table ───────────────────────────────────────────────
+    s3 = prs.slides.add_slide(blank)
+    _bg(s3)
+    _txt(s3, 0.5, 0.2, 12, 0.7, "Creative Rankings", size=22, bold=True, color=(0x4F, 0x8E, 0xF7))
+    tbl_keys = [c for c in ["creative_id","platform","spend","paid_starts","cpa","ctr","decision_label"] if c in df.columns]
+    tbl_hdrs = {"creative_id":"Creative","platform":"Platform","spend":"Spend ($)","paid_starts":"Paid Starts",
+                "cpa":"CPA ($)","ctr":"CTR (%)","decision_label":"Decision"}
+    top10 = df.head(10).reset_index(drop=True)
+    if tbl_keys and not top10.empty:
+        tbl = s3.shapes.add_table(
+            len(top10) + 1, len(tbl_keys), Inches(0.4), Inches(1.0), Inches(12.5), Inches(6.0)
+        ).table
+        for j, k in enumerate(tbl_keys):
+            c = tbl.cell(0, j)
+            c.text = tbl_hdrs.get(k, k)
+            c.text_frame.paragraphs[0].font.bold = True
+            c.text_frame.paragraphs[0].font.size = Pt(9)
+            c.text_frame.paragraphs[0].font.color.rgb = RGBColor(0xFF, 0xFF, 0xFF)
+            c.fill.solid(); c.fill.fore_color.rgb = RGBColor(0x1E, 0x3A, 0x8A)
+        for i, (_, row) in enumerate(top10.iterrows()):
+            for j, k in enumerate(tbl_keys):
+                c = tbl.cell(i + 1, j)
+                v = row.get(k, "")
+                if k in ("spend", "cpa") and pd.notna(v):
+                    c.text = f"${float(v):,.0f}"
+                elif k == "ctr" and pd.notna(v):
+                    c.text = f"{float(v):.1f}%"
+                elif k == "paid_starts" and pd.notna(v):
+                    c.text = f"{int(v):,}"
+                else:
+                    c.text = sanitize_pdf_text(str(v)) if pd.notna(v) else "-"
+                c.text_frame.paragraphs[0].font.size = Pt(8)
+                c.text_frame.paragraphs[0].font.color.rgb = RGBColor(0x1E, 0x29, 0x3B)
+                bg = (0xF1, 0xF5, 0xF9) if i % 2 == 0 else (0xFF, 0xFF, 0xFF)
+                c.fill.solid(); c.fill.fore_color.rgb = RGBColor(*bg)
+
+    # ── Slide 4: Recommendations ──────────────────────────────────────────────
+    s4 = prs.slides.add_slide(blank)
+    _bg(s4)
+    _txt(s4, 0.5, 0.2, 12, 0.7, "Recommendations", size=22, bold=True, color=(0x4F, 0x8E, 0xF7))
+    recs = get_recommendations_text(df)
+    box = s4.shapes.add_textbox(Inches(0.5), Inches(1.0), Inches(12.3), Inches(6.0))
+    tf4 = box.text_frame
+    tf4.word_wrap = True
+    for i, rec in enumerate(recs[:14]):
+        p = tf4.paragraphs[0] if i == 0 else tf4.add_paragraph()
+        p.text = f"- {sanitize_pdf_text(rec)}"
+        p.font.size = Pt(11)
+        p.font.color.rgb = RGBColor(0xFA, 0xFA, 0xFA)
+        p.space_after = Pt(4)
+
+    buf = BytesIO()
+    prs.save(buf)
+    return buf.getvalue()
+
+
+# ══════════════════════════════════════════════════════════════════════════════
 # PAGE RENDERERS
 # ══════════════════════════════════════════════════════════════════════════════
 
@@ -1719,11 +2208,22 @@ def page_analyzer(
     if st.session_state.df_raw is not None:
         df_raw = st.session_state.df_raw
 
+        # ── Column mapper: let users fix unmapped columns ─────────────────────
+        mapped = render_column_mapper(df_raw)
+        if mapped is not None:
+            st.session_state.df_raw = mapped
+            df_raw = mapped
+
         for w in st.session_state.get("warnings", []):
             st.warning(w)
 
         df, kpi_warnings = calculate_kpis(df_raw)
         df = assign_decision_labels(df, cpa_target=cpa_target)
+
+        # Flag fatiguing creatives if a date column is present
+        fatigue_ids = detect_fatigue_ids(df)
+        if fatigue_ids and "decision_label" in df.columns:
+            df.loc[df["creative_id"].isin(fatigue_ids), "decision_label"] = "Fatiguing"
 
         goal_options = [
             "Paid Starts", "Trial Starts", "Efficient Paid Starts",
@@ -1799,11 +2299,35 @@ def page_analyzer(
             )
         render_ranking_table(df_ranked)
 
+        # ── Statistical significance ───────────────────────────────────────────
+        df_ranked_sig = compute_significance(df_ranked)
+        with st.expander("🧪 Statistical Significance", expanded=False):
+            render_significance(df_ranked_sig)
+
+        # ── Fatigue alert ─────────────────────────────────────────────────────
+        ranked_fatigue = detect_fatigue_ids(df_ranked)
+        if ranked_fatigue:
+            st.warning(
+                f"⚠️ **Creative Fatigue detected** in: {', '.join(str(c) for c in ranked_fatigue)}. "
+                "These creatives show consistently rising CPA or falling CTR across periods. "
+                "Consider refreshing creative or testing new angles."
+            )
+        elif detect_date_col(df_ranked) is not None:
+            st.success("✅ No monotonic fatigue patterns detected across periods.")
+
         st.divider()
 
         st.markdown("<div class='section-header'>Visuals</div>", unsafe_allow_html=True)
         render_charts(df_ranked, cpa_target=cpa_target)
         render_chart_csv_downloads(df_ranked)
+
+        # ── Benchmark comparison ──────────────────────────────────────────────
+        with st.expander("📊 Platform Benchmark Comparison", expanded=False):
+            render_benchmark_comparison(df_ranked, st.session_state.get("_benchmarks", {}))
+
+        # ── Trend sparklines ──────────────────────────────────────────────────
+        with st.expander("📈 Creative Trend Sparklines", expanded=False):
+            render_trend_sparklines(df_ranked)
 
         st.divider()
 
@@ -1815,21 +2339,60 @@ def page_analyzer(
         st.markdown("<div class='section-header'>What should we test next?</div>", unsafe_allow_html=True)
         render_recommendations(df_ranked)
 
+        # ── Budget reallocation ───────────────────────────────────────────────
+        with st.expander("💰 Budget Reallocation Plan", expanded=False):
+            render_budget_reallocation(df_ranked)
+
+        # ── Spend pacing ──────────────────────────────────────────────────────
+        with st.expander("📅 Spend Pacing Tracker", expanded=False):
+            render_spend_pacing(df_ranked)
+
         st.divider()
-        try:
-            pdf_bytes = build_pdf_report(df_ranked, goal, cpa_target)
-            today_str = datetime.date.today().strftime("%Y-%m-%d")
-            safe_goal = re.sub(r"[^\w]+", "_", goal.lower()).strip("_")
-            st.download_button(
-                label="⬇ Download PDF Report",
-                data=pdf_bytes,
-                file_name=f"creative_report_{safe_goal}_{today_str}.pdf",
-                mime="application/pdf",
-                use_container_width=True,
-                key="dl_pdf",
+
+        # ── Summary snippet ───────────────────────────────────────────────────
+        with st.expander("📋 Summary Snippet (copy for Slack / email)", expanded=False):
+            snippet = build_summary_snippet(df_ranked, goal, cpa_target)
+            st.text_area(
+                "Copy this summary",
+                value=snippet,
+                height=220,
+                label_visibility="collapsed",
+                key="summary_snippet_area",
             )
-        except Exception as _pdf_err:
-            st.error(f"PDF export failed: {_pdf_err}")
+
+        # ── Exports ───────────────────────────────────────────────────────────
+        st.markdown("<div class='section-header'>Export Reports</div>", unsafe_allow_html=True)
+        export_col1, export_col2 = st.columns(2)
+        today_str = datetime.date.today().strftime("%Y-%m-%d")
+        safe_goal = re.sub(r"[^\w]+", "_", goal.lower()).strip("_")
+
+        with export_col1:
+            try:
+                pdf_bytes = build_pdf_report(df_ranked, goal, cpa_target)
+                st.download_button(
+                    label="⬇ Download PDF Report",
+                    data=pdf_bytes,
+                    file_name=f"creative_report_{safe_goal}_{today_str}.pdf",
+                    mime="application/pdf",
+                    use_container_width=True,
+                    key="dl_pdf",
+                )
+            except Exception as _pdf_err:
+                st.error(f"PDF export failed: {_pdf_err}")
+
+        with export_col2:
+            try:
+                pptx_bytes = build_pptx_report(df_ranked, goal, cpa_target)
+                st.download_button(
+                    label="⬇ Download PowerPoint Report",
+                    data=pptx_bytes,
+                    file_name=f"creative_report_{safe_goal}_{today_str}.pptx",
+                    mime="application/vnd.openxmlformats-officedocument.presentationml.presentation",
+                    use_container_width=True,
+                    key="dl_pptx",
+                )
+            except Exception as _pptx_err:
+                st.error(f"PPTX export failed: {_pptx_err}")
 
     else:
         st.markdown(
@@ -2214,6 +2777,160 @@ def page_methodology():
 
 
 # ══════════════════════════════════════════════════════════════════════════════
+# PAGE: WEEK-OVER-WEEK COMPARE
+# ══════════════════════════════════════════════════════════════════════════════
+
+def page_compare():
+    st.markdown(
+        """
+        <div style="display:flex;align-items:center;gap:12px;margin-bottom:0.2rem;">
+          <span style="font-size:2rem;">📅</span>
+          <span style="font-size:1.7rem;font-weight:800;letter-spacing:-0.02em;">Week-over-Week Comparison</span>
+        </div>
+        <p style="color:#8A9BC8;margin-top:0;margin-bottom:1rem;font-size:0.95rem;">
+          Upload two data exports to compare creative performance across periods.
+          Match is done on Creative ID — creatives that appear in only one period show blanks for the other.
+        </p>
+        """,
+        unsafe_allow_html=True,
+    )
+    st.divider()
+
+    col1, col2 = st.columns(2)
+    with col1:
+        st.markdown("**Current Period**")
+        file_a = st.file_uploader(
+            "Current period CSV / Excel",
+            type=["csv", "xlsx", "xls"],
+            key="wow_file_a",
+        )
+    with col2:
+        st.markdown("**Previous Period**")
+        file_b = st.file_uploader(
+            "Previous period CSV / Excel",
+            type=["csv", "xlsx", "xls"],
+            key="wow_file_b",
+        )
+
+    if not file_a or not file_b:
+        st.info("Upload both files above to generate the comparison.")
+        return
+
+    try:
+        df_a, _ = load_and_clean(file_a)
+        df_b, _ = load_and_clean(file_b)
+    except Exception as e:
+        st.error(f"Could not load files: {e}")
+        return
+
+    if "creative_id" not in df_a.columns or "creative_id" not in df_b.columns:
+        st.error("Both files must have a Creative ID column.")
+        return
+
+    df_a, _ = calculate_kpis(df_a)
+    df_b, _ = calculate_kpis(df_b)
+
+    metrics = ["spend", "cpa", "paid_starts", "ctr", "thumbstop_rate", "trial_starts"]
+    avail = [m for m in metrics if m in df_a.columns and m in df_b.columns]
+    if not avail:
+        st.warning("No common metric columns found between the two files.")
+        return
+
+    merged = df_a[["creative_id"] + avail].merge(
+        df_b[["creative_id"] + avail],
+        on="creative_id",
+        suffixes=("_curr", "_prev"),
+        how="outer",
+    )
+
+    metric_labels = {
+        "spend": "Spend ($)", "cpa": "CPA ($)", "paid_starts": "Paid Starts",
+        "ctr": "CTR (%)", "thumbstop_rate": "Thumbstop (%)", "trial_starts": "Trial Starts",
+    }
+    lower_is_better = {"cpa", "spend"}
+
+    def _fmt(m, v):
+        if pd.isna(v): return "—"
+        if m in ("spend", "cpa"): return f"${v:,.0f}"
+        if m in ("ctr", "thumbstop_rate"): return f"{v:.1f}%"
+        return f"{int(v):,}"
+
+    display_rows = []
+    for _, row in merged.iterrows():
+        r: dict = {"Creative": row["creative_id"]}
+        for m in avail:
+            curr = row.get(f"{m}_curr")
+            prev = row.get(f"{m}_prev")
+            lbl = metric_labels.get(m, m)
+            r[f"{lbl} (Now)"] = _fmt(m, curr)
+            r[f"{lbl} (Prev)"] = _fmt(m, prev)
+            if pd.notna(curr) and pd.notna(prev) and prev != 0:
+                pct = (curr - prev) / prev * 100
+                arrow = "↑" if pct > 0 else "↓"
+                r[f"{lbl} Δ"] = f"{arrow} {abs(pct):.1f}%"
+            else:
+                r[f"{lbl} Δ"] = "—"
+        display_rows.append(r)
+
+    st.markdown("<div class='section-header'>Performance Delta by Creative</div>", unsafe_allow_html=True)
+    st.dataframe(pd.DataFrame(display_rows), use_container_width=True)
+
+    # ── CPA comparison chart ───────────────────────────────────────────────
+    if "cpa" in avail:
+        cpa_data = merged[["creative_id", "cpa_curr", "cpa_prev"]].dropna()
+        if not cpa_data.empty:
+            cpa_melt = cpa_data.melt(
+                id_vars="creative_id",
+                value_vars=["cpa_curr", "cpa_prev"],
+                var_name="Period", value_name="CPA ($)",
+            )
+            cpa_melt["Period"] = cpa_melt["Period"].map({"cpa_curr": "Current", "cpa_prev": "Previous"})
+            fig_cpa = px.bar(
+                cpa_melt, x="creative_id", y="CPA ($)", color="Period", barmode="group",
+                color_discrete_map={"Current": "#4F8EF7", "Previous": "#8A9BC8"},
+                labels={"creative_id": "Creative"},
+                title="CPA: Current vs Previous Period",
+            )
+            fig_cpa.update_layout(
+                paper_bgcolor="#0E1117", plot_bgcolor="#0E1117", font_color="#FAFAFA",
+                xaxis=dict(gridcolor="#1E2A45", tickangle=-30),
+                yaxis=dict(gridcolor="#1E2A45"),
+            )
+            st.plotly_chart(fig_cpa, use_container_width=True)
+
+    # ── Paid Starts comparison chart ───────────────────────────────────────
+    if "paid_starts" in avail:
+        ps_data = merged[["creative_id", "paid_starts_curr", "paid_starts_prev"]].dropna()
+        if not ps_data.empty:
+            ps_melt = ps_data.melt(
+                id_vars="creative_id",
+                value_vars=["paid_starts_curr", "paid_starts_prev"],
+                var_name="Period", value_name="Paid Starts",
+            )
+            ps_melt["Period"] = ps_melt["Period"].map({"paid_starts_curr": "Current", "paid_starts_prev": "Previous"})
+            fig_ps = px.bar(
+                ps_melt, x="creative_id", y="Paid Starts", color="Period", barmode="group",
+                color_discrete_map={"Current": "#34d399", "Previous": "#8A9BC8"},
+                labels={"creative_id": "Creative"},
+                title="Paid Starts: Current vs Previous Period",
+            )
+            fig_ps.update_layout(
+                paper_bgcolor="#0E1117", plot_bgcolor="#0E1117", font_color="#FAFAFA",
+                xaxis=dict(gridcolor="#1E2A45", tickangle=-30),
+                yaxis=dict(gridcolor="#1E2A45"),
+            )
+            st.plotly_chart(fig_ps, use_container_width=True)
+
+    st.download_button(
+        "⬇ Download Comparison CSV",
+        data=pd.DataFrame(display_rows).to_csv(index=False).encode("utf-8"),
+        file_name="wow_comparison.csv",
+        mime="text/csv",
+        key="dl_wow",
+    )
+
+
+# ══════════════════════════════════════════════════════════════════════════════
 # APP LAYOUT
 # ══════════════════════════════════════════════════════════════════════════════
 
@@ -2260,7 +2977,7 @@ with st.sidebar:
     st.divider()
     page = st.radio(
         "Navigation",
-        ["Analyzer", "Integrations", "Methodology"],
+        ["Analyzer", "Compare", "Integrations", "Methodology"],
         label_visibility="collapsed",
     )
     st.divider()
@@ -2312,6 +3029,26 @@ with st.sidebar:
             key="cpa_target_input",
             help="Creatives below this CPA are flagged as Scale candidates. Affects decision labels and chart reference lines.",
         )
+
+        st.markdown("---")
+        st.markdown("**Benchmark Targets**")
+        st.caption("Enter platform averages so the Benchmark Comparison expander can show deltas. Leave 0 to skip.")
+        _bench_platforms = ["Meta", "TikTok", "YouTube", "Google"]
+        _benchmarks: dict[str, float] = {}
+        for _bp in _bench_platforms:
+            bc1, bc2, bc3 = st.columns(3)
+            with bc1:
+                st.caption(_bp)
+            with bc2:
+                _bv_ctr = st.number_input(f"CTR % ({_bp})", min_value=0.0, value=0.0, step=0.1, key=f"bench_{_bp}_ctr", label_visibility="collapsed")
+                if _bv_ctr > 0:
+                    _benchmarks[f"{_bp}_ctr"] = _bv_ctr
+            with bc3:
+                _bv_cpa = st.number_input(f"CPA $ ({_bp})", min_value=0.0, value=0.0, step=5.0, key=f"bench_{_bp}_cpa", label_visibility="collapsed")
+                if _bv_cpa > 0:
+                    _benchmarks[f"{_bp}_cpa"] = _bv_cpa
+        st.caption("Columns: Platform · CTR (%) · CPA ($)")
+        st.session_state["_benchmarks"] = _benchmarks
 
         st.markdown("---")
         st.markdown("**Creative Engagement weights**")
@@ -2366,6 +3103,8 @@ with st.sidebar:
 # ── Route to page ─────────────────────────────────────────────────────────────
 if page == "Analyzer":
     page_analyzer(cpa_target=cpa_target, ce_weights=ce_weights, ffq_weights=ffq_weights)
+elif page == "Compare":
+    page_compare()
 elif page == "Integrations":
     page_integrations()
 elif page == "Methodology":
