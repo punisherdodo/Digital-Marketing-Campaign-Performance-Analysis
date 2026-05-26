@@ -62,6 +62,37 @@ pip install -r requirements.txt
 
 ---
 
+## Project structure
+
+```
+creative-performance-analyzer/
+├── app.py                          # Streamlit UI — render_* and page_* functions only
+├── requirements.txt
+├── sample_data/
+│   └── sample_creative_performance.csv  # 20-row generic sample (Meta / TikTok / YouTube Shorts)
+├── utils/
+│   ├── __init__.py
+│   ├── data_processing.py          # Column mapping, load/clean, KPI calculation, formatters, save helpers
+│   ├── scoring.py                  # CPA target, ranking logic, decision labels, fatigue, significance
+│   ├── recommendations.py          # Pattern insights, test recommendations, summary snippet
+│   ├── exports.py                  # CSV, PDF (fpdf2), and PowerPoint (python-pptx) export builders
+│   └── integrations.py             # Prototype connection tests and Google Sheets loader
+└── .streamlit/
+    └── config.toml                 # Dark theme + Replit iframe config
+```
+
+Import hierarchy (no circular dependencies):
+
+```
+data_processing  ←  scoring
+data_processing  ←  recommendations
+data_processing
+recommendations  ←  exports
+app.py           ←  all of the above
+```
+
+---
+
 ## Supported input columns
 
 The app auto-detects common column name variants. Canonical names:
