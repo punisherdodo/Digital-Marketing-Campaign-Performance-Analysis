@@ -1,0 +1,5 @@
+# Tell GitHub this is a Python/Streamlit project.
+# The two files below are Replit platform config — not source code.
+# linguist-vendored prevents them from affecting the repo's detected language.
+.replit linguist-vendored
+.replitignore linguist-vendored
