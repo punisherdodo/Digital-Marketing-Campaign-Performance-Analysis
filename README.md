@@ -73,8 +73,8 @@ No API keys, no setup, no accounts required.
 
 ```bash
 # 1. Clone the repo
-git clone https://github.com/YOUR_USERNAME/creative-performance-analyzer.git
-cd creative-performance-analyzer
+git clone https://github.com/punisherdodo/Digital-Marketing-Campaign-Performance-Analysis.git
+cd Digital-Marketing-Campaign-Performance-Analysis
 
 # 2. (Optional but recommended) create a virtual environment
 python -m venv venv
